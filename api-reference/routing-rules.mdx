@@ -1,0 +1,310 @@
+---
+title: "Routing Rules API: Dynamic Request Routing in Bifrost"
+sidebarTitle: "Routing Rules"
+description: "Create CEL-expression routing rules that dynamically direct requests to providers and models based on headers, model name, budget state, and more."
+---
+
+Routing rules let you express fine-grained, programmatic routing logic that goes beyond the static `provider_configs` weight on a virtual key. Each rule contains a [CEL (Common Expression Language)](https://cel.dev) expression that Bifrost evaluates against every incoming request. When the expression matches, the request is probabilistically distributed across the rule's `targets` according to their weights.
+
+Rules are evaluated in priority order (lower number = higher priority). The first matching rule wins. If no rule matches, Bifrost falls back to the virtual key's provider configs.
+
+<Note>
+  All management endpoints require `Authorization: Bearer <admin-api-key>`. Virtual keys and `x-api-key` headers are not accepted on management routes.
+</Note>
+
+---
+
+## List routing rules
+
+<Note>
+  `GET /api/governance/routing-rules`
+</Note>
+
+Returns all routing rules ordered by priority.
+
+### Example
+
+<CodeGroup>
+```bash cURL
+curl -X GET https://your-bifrost-host/api/governance/routing-rules \
+  -H "Authorization: Bearer <admin-api-key>"
+```
+
+```json Response 200
+{
+  "rules": [
+    {
+      "id": "rule_001",
+      "name": "Route GPT-4o to OpenAI",
+      "scope": "global",
+      "enabled": true,
+      "priority": 10,
+      "cel_expression": "request.model == 'gpt-4o'",
+      "targets": [
+        {
+          "weight": 1.0,
+          "provider": "openai",
+          "model": "gpt-4o",
+          "key_id": ""
+        }
+      ],
+      "fallbacks": ["anthropic/claude-3-5-sonnet-20241022"],
+      "created_at": "2024-06-01T00:00:00Z",
+      "updated_at": "2024-06-01T00:00:00Z"
+    }
+  ],
+  "count": 1,
+  "total_count": 1,
+  "limit": 25,
+  "offset": 0
+}
+```
+</CodeGroup>
+
+---
+
+## Create a routing rule
+
+<Note>
+  `POST /api/governance/routing-rules`
+</Note>
+
+Creates a new CEL-based routing rule. Rules are evaluated at request time; the `cel_expression` has access to request attributes such as `request.model`, `request.headers`, and virtual key budget state.
+
+### Request body
+
+<ParamField body="name" type="string" required>
+  Human-readable name for the rule.
+</ParamField>
+
+<ParamField body="scope" type="string" required>
+  Scope level for the rule. Use `global` for a rule that applies to all requests regardless of virtual key. Use `virtual_key` and set `scope_id` for a key-scoped rule.
+</ParamField>
+
+<ParamField body="cel_expression" type="string" required>
+  A [CEL expression](https://cel.dev) evaluated against each incoming request. Available attributes include:
+  - `request.model` — the model name requested by the caller
+  - `request.provider` — the provider identifier
+  - `request.headers["<header-name>"]` — any HTTP request header value
+  - `virtual_key.budget_exceeded` — `true` if the key's primary budget is exhausted
+
+  The expression must evaluate to a boolean. When it returns `true` the rule's targets are used.
+</ParamField>
+
+<ParamField body="targets" type="array" required>
+  One or more weighted routing targets. Weights must sum to `1.0`. At request time Bifrost probabilistically selects a target.
+
+  <Expandable title="target fields">
+    <ParamField body="weight" type="number" required>
+      Fraction of matched traffic routed to this target. All target weights in the array must sum to `1.0`.
+    </ParamField>
+    <ParamField body="provider" type="string">
+      Provider identifier, e.g. `openai`, `anthropic`. Leave empty to use the provider from the original request.
+    </ParamField>
+    <ParamField body="model" type="string">
+      Model name to use. Leave empty to use the model from the original request.
+    </ParamField>
+    <ParamField body="key_id" type="string">
+      Specific provider API key ID to use. Leave empty to let Bifrost pick via its key-selection policy.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="priority" type="integer" required>
+  Evaluation order. Lower numbers are evaluated first. When two rules have the same priority, evaluation order is unspecified.
+</ParamField>
+
+<ParamField body="description" type="string">
+  Optional free-text description.
+</ParamField>
+
+<ParamField body="enabled" type="boolean" default="true">
+  Whether this rule is active. Disabled rules are skipped during evaluation.
+</ParamField>
+
+<ParamField body="fallbacks" type="array">
+  Ordered list of `"provider/model"` strings tried if all targets fail. Example: `["anthropic/claude-3-5-sonnet-20241022"]`.
+</ParamField>
+
+<ParamField body="scope_id" type="string">
+  Required when `scope` is not `global`. The ID of the virtual key (or other entity) this rule is scoped to.
+</ParamField>
+
+### Example: route by model name
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://your-bifrost-host/api/governance/routing-rules \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Route GPT-4o to OpenAI",
+    "scope": "global",
+    "cel_expression": "request.model == '\''gpt-4o'\''",
+    "targets": [
+      {
+        "weight": 1.0,
+        "provider": "openai",
+        "model": "gpt-4o"
+      }
+    ],
+    "priority": 10,
+    "fallbacks": ["anthropic/claude-3-5-sonnet-20241022"],
+    "enabled": true,
+    "description": "Hard-route gpt-4o requests to OpenAI"
+  }'
+```
+
+```json Response 200
+{
+  "message": "Routing rule created successfully",
+  "rule": {
+    "id": "rule_001",
+    "name": "Route GPT-4o to OpenAI",
+    "scope": "global",
+    "scope_id": null,
+    "enabled": true,
+    "priority": 10,
+    "cel_expression": "request.model == 'gpt-4o'",
+    "targets": [
+      {
+        "weight": 1.0,
+        "provider": "openai",
+        "model": "gpt-4o",
+        "key_id": ""
+      }
+    ],
+    "fallbacks": ["anthropic/claude-3-5-sonnet-20241022"],
+    "created_at": "2024-06-15T10:00:00Z",
+    "updated_at": "2024-06-15T10:00:00Z"
+  }
+}
+```
+</CodeGroup>
+
+### Example: route by custom header
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://your-bifrost-host/api/governance/routing-rules \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Route premium users to GPT-4o",
+    "scope": "global",
+    "cel_expression": "request.headers['\''x-user-tier'\''] == '\''premium'\''",
+    "targets": [
+      {
+        "weight": 0.8,
+        "provider": "openai",
+        "model": "gpt-4o"
+      },
+      {
+        "weight": 0.2,
+        "provider": "anthropic",
+        "model": "claude-3-5-sonnet-20241022"
+      }
+    ],
+    "priority": 5,
+    "enabled": true
+  }'
+```
+
+```json Response 200
+{
+  "message": "Routing rule created successfully",
+  "rule": {
+    "id": "rule_002",
+    "name": "Route premium users to GPT-4o",
+    "scope": "global",
+    "enabled": true,
+    "priority": 5,
+    "cel_expression": "request.headers['x-user-tier'] == 'premium'",
+    "targets": [
+      { "weight": 0.8, "provider": "openai", "model": "gpt-4o" },
+      { "weight": 0.2, "provider": "anthropic", "model": "claude-3-5-sonnet-20241022" }
+    ]
+  }
+}
+```
+</CodeGroup>
+
+### Response fields
+
+<ResponseField name="message" type="string">Status message.</ResponseField>
+<ResponseField name="rule" type="object">
+  The created routing rule.
+
+  <Expandable title="rule fields">
+    <ResponseField name="id" type="string">Unique rule ID.</ResponseField>
+    <ResponseField name="name" type="string">Display name.</ResponseField>
+    <ResponseField name="scope" type="string">`global` or `virtual_key`.</ResponseField>
+    <ResponseField name="scope_id" type="string">Scoped entity ID, or `null` for global rules.</ResponseField>
+    <ResponseField name="enabled" type="boolean">Whether the rule is active.</ResponseField>
+    <ResponseField name="priority" type="integer">Evaluation order (lower = evaluated first).</ResponseField>
+    <ResponseField name="cel_expression" type="string">The CEL expression evaluated per request.</ResponseField>
+    <ResponseField name="targets" type="array">Weighted routing targets.</ResponseField>
+    <ResponseField name="fallbacks" type="array">Ordered fallback `"provider/model"` strings.</ResponseField>
+    <ResponseField name="created_at" type="string">ISO 8601 creation timestamp.</ResponseField>
+    <ResponseField name="updated_at" type="string">ISO 8601 last-updated timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## Delete a routing rule
+
+<Note>
+  `DELETE /api/governance/routing-rules/{rule_id}`
+</Note>
+
+Permanently deletes a routing rule. Deletion takes effect immediately — subsequent requests that previously matched this rule will fall through to the next matching rule or the virtual key's static provider configs.
+
+### Path parameters
+
+<ParamField path="rule_id" type="string" required>
+  The ID of the routing rule to delete.
+</ParamField>
+
+### Example
+
+<CodeGroup>
+```bash cURL
+curl -X DELETE https://your-bifrost-host/api/governance/routing-rules/rule_001 \
+  -H "Authorization: Bearer <admin-api-key>"
+```
+
+```json Response 200
+{
+  "message": "Routing rule deleted successfully"
+}
+```
+</CodeGroup>
+
+---
+
+## CEL expression reference
+
+Below are common patterns for `cel_expression` values:
+
+| Goal | Expression |
+|------|-----------|
+| Match a specific model | `request.model == "gpt-4o"` |
+| Match any OpenAI model | `request.provider == "openai"` |
+| Match on a custom header | `request.headers["x-env"] == "production"` |
+| Route when budget is exhausted | `virtual_key.budget_exceeded == true` |
+| Match model prefix | `request.model.startsWith("claude")` |
+
+<Tip>
+  Use a low priority number (e.g. `1`) for high-urgency rules like budget-exhaustion fallbacks, and higher numbers (e.g. `100`) for general model-routing rules.
+</Tip>
+
+---
+
+## Error responses
+
+| Status | Type | Description |
+|--------|------|-------------|
+| `400` | `bad_request` | Missing required field, invalid CEL syntax, or target weights don't sum to `1.0` |
+| `404` | `not_found` | Rule ID does not exist |
+| `500` | `internal_error` | Unexpected server error |

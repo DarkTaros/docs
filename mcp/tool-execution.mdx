@@ -1,0 +1,277 @@
+---
+title: "MCP Tool Execution: Approve and Run LLM Tool Calls"
+sidebarTitle: "Tool Execution"
+description: "Execute MCP tool calls from LLM responses with full control over approval, security validation, and conversation state in a stateless workflow."
+---
+
+When an LLM returns tool calls in its response, Bifrost does **not** automatically execute them. Your application explicitly drives every step — deciding which tool calls to approve, executing them one at a time or in batch, and assembling the conversation history for the next turn. This stateless model gives you full control over user approval workflows, security validation, and audit logging.
+
+The basic pattern is: **Chat Request → Review Tool Calls → Execute Tools → Continue Conversation**.
+
+## The Stateless Execution Model
+
+Bifrost is stateless by design. Each API call is independent — your application owns the conversation history and decides what to send next. This means:
+
+- You can reject individual tool calls while executing others
+- You can inject your own validation logic between the LLM response and tool execution
+- Every tool operation is explicit and auditable
+- No background state can cause unexpected side effects
+
+## End-to-End Example
+
+The following walkthrough shows the complete three-step flow using curl. The same steps apply when using the Go SDK.
+
+<Steps>
+  <Step title="Send the initial chat request">
+    Post your conversation to `/v1/chat/completions`. Bifrost automatically injects MCP tool definitions. If the LLM decides it needs a tool, it returns `finish_reason: "tool_calls"`.
+
+    ```bash
+    curl -X POST http://localhost:8080/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "openai/gpt-4o",
+        "messages": [
+          {
+            "role": "user",
+            "content": "List files in the current directory"
+          }
+        ]
+      }'
+    ```
+
+    The LLM responds with one or more tool call suggestions — nothing has been executed yet:
+
+    ```json
+    {
+      "id": "chatcmpl-abc123",
+      "choices": [{
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call_xyz789",
+            "type": "function",
+            "function": {
+              "name": "filesystem_list_directory",
+              "arguments": "{\"path\": \".\"}"
+            }
+          }]
+        },
+        "finish_reason": "tool_calls"
+      }]
+    }
+    ```
+
+    <Note>
+      Tool names are prefixed with the MCP client name (e.g., `filesystem_list_directory`). This ensures uniqueness when you have multiple MCP clients connected.
+    </Note>
+  </Step>
+
+  <Step title="Execute the approved tool call">
+    After reviewing the tool call, POST it directly to `/v1/mcp/tool/execute`. The request body is the tool call object from the LLM response — you can copy it verbatim:
+
+    ```bash
+    curl -X POST http://localhost:8080/v1/mcp/tool/execute \
+      -H "Content-Type: application/json" \
+      -d '{
+        "id": "call_xyz789",
+        "type": "function",
+        "function": {
+          "name": "filesystem_list_directory",
+          "arguments": "{\"path\": \".\"}"
+        }
+      }'
+    ```
+
+    Bifrost routes the call to the correct MCP server and returns the result in a format ready to append to your conversation history:
+
+    ```json
+    {
+      "role": "tool",
+      "content": "[\"config.json\", \"main.go\", \"README.md\"]",
+      "tool_call_id": "call_xyz789"
+    }
+    ```
+  </Step>
+
+  <Step title="Continue the conversation with tool results">
+    Assemble the full conversation history — original user message, the assistant's tool-call message, and the tool result — then POST again to `/v1/chat/completions`:
+
+    ```bash
+    curl -X POST http://localhost:8080/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "openai/gpt-4o",
+        "messages": [
+          {
+            "role": "user",
+            "content": "List files in the current directory"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+              "id": "call_xyz789",
+              "type": "function",
+              "function": {
+                "name": "filesystem_list_directory",
+                "arguments": "{\"path\": \".\"}"
+              }
+            }]
+          },
+          {
+            "role": "tool",
+            "content": "[\"config.json\", \"main.go\", \"README.md\"]",
+            "tool_call_id": "call_xyz789"
+          }
+        ]
+      }'
+    ```
+
+    The LLM produces its final response incorporating the tool result:
+
+    ```json
+    {
+      "choices": [{
+        "message": {
+          "role": "assistant",
+          "content": "The current directory contains 3 files:\n\n1. **config.json** — Configuration file\n2. **main.go** — Go source file\n3. **README.md** — Documentation"
+        },
+        "finish_reason": "stop"
+      }]
+    }
+    ```
+  </Step>
+</Steps>
+
+## Approving vs. Rejecting Tool Calls
+
+Because execution is explicit, you can selectively approve or skip tool calls. If you receive multiple tool calls in one response, you can execute a subset and build the history with only those results. If you reject a tool call entirely, you can append a synthetic `tool` message explaining the rejection so the LLM can recover gracefully.
+
+## Multiple Tool Calls
+
+LLMs often request several tools in a single response. You can execute them sequentially or in parallel and collect all results before continuing the conversation:
+
+<Tabs>
+  <Tab title="Sequential">
+    ```bash
+    # Execute each tool call one after another
+    # and collect results before the next chat turn
+
+    # Execute first tool
+    curl -X POST http://localhost:8080/v1/mcp/tool/execute \
+      -H "Content-Type: application/json" \
+      -d '{"id": "call_1", "type": "function", "function": {"name": "filesystem_list_directory", "arguments": "{\"path\": \".\"}"}}'
+
+    # Execute second tool
+    curl -X POST http://localhost:8080/v1/mcp/tool/execute \
+      -H "Content-Type: application/json" \
+      -d '{"id": "call_2", "type": "function", "function": {"name": "filesystem_read_file", "arguments": "{\"path\": \"README.md\"}"}}'
+    ```
+  </Tab>
+  <Tab title="Parallel (Go SDK)">
+    ```go
+    toolCalls := *response.Choices[0].Message.ToolCalls
+    results := make([]*schemas.ChatMessage, len(toolCalls))
+    var wg sync.WaitGroup
+
+    for i, toolCall := range toolCalls {
+        wg.Add(1)
+        go func(idx int, tc schemas.ChatAssistantMessageToolCall) {
+            defer wg.Done()
+            result, err := client.ExecuteChatMCPTool(ctx, tc)
+            if err == nil {
+                results[idx] = result
+            }
+        }(i, toolCall)
+    }
+
+    wg.Wait()
+
+    for _, result := range results {
+        if result != nil {
+            history = append(history, *result)
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Response Formats
+
+The execute endpoint supports two response formats to match the API style you are using:
+
+<Tabs>
+  <Tab title="Chat Format (Default)">
+    Use `POST /v1/mcp/tool/execute` or `POST /v1/mcp/tool/execute?format=chat`.
+
+    The response is a message object with `role: "tool"` ready to append directly to your messages array:
+
+    ```json
+    {
+      "role": "tool",
+      "content": "{\"key\": \"value\"}",
+      "tool_call_id": "call_xyz789"
+    }
+    ```
+  </Tab>
+  <Tab title="Responses Format">
+    Use `POST /v1/mcp/tool/execute?format=responses` for the Responses API format.
+
+    Request body uses `function_call_output` shape:
+
+    ```json
+    {
+      "type": "function_call_output",
+      "call_id": "call_xyz789",
+      "name": "filesystem_read_file",
+      "arguments": "{\"path\": \"config.json\"}"
+    }
+    ```
+
+    Response:
+
+    ```json
+    {
+      "type": "function_call_output",
+      "call_id": "call_xyz789",
+      "output": "{\"key\": \"value\"}"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Error Handling
+
+Tool execution can fail for several reasons. The gateway returns structured error responses:
+
+```json
+{
+  "error": {
+    "type": "tool_execution_error",
+    "message": "Tool 'filesystem_delete_file' is not allowed for this request"
+  }
+}
+```
+
+Common error causes include:
+
+- **Tool not found** — The MCP client is disconnected or the tool name is incorrect
+- **Not allowed** — The tool is filtered out by your `tools_to_execute` configuration
+- **Timeout** — The tool exceeded the `tool_execution_timeout` limit (default: 30 seconds)
+- **Upstream error** — The MCP server returned an error for the tool call
+
+## Authentication
+
+The `/v1/mcp/tool/execute` endpoint uses the same authentication as `/v1/chat/completions`. If you have `disable_auth_on_inference: true`, no auth is required. Otherwise, virtual key authentication applies. See [Virtual Keys](/concepts/virtual-keys) for details.
+
+## Next Steps
+
+<Card title="Agent Mode" icon="robot" href="/mcp/agent-mode">
+  Skip the manual execute loop and let Bifrost auto-execute approved tools in an autonomous agent loop.
+</Card>
+
+<Card title="Tool Filtering" icon="filter" href="/concepts/virtual-keys">
+  Control which tools are available per request or per virtual key.
+</Card>

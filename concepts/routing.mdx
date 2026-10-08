@@ -1,0 +1,202 @@
+---
+title: "Request Routing: Direct Traffic to Models and Providers"
+sidebarTitle: "Routing"
+description: "How Bifrost routes requests: provider/model prefixes, virtual key weighted configs, automatic fallback chains, and the model-catalog resolver."
+---
+
+Every request that arrives at Bifrost must be matched to a specific provider before any upstream call is made. Bifrost resolves that provider through a layered routing system: explicit provider prefixes take top priority, followed by governance rules encoded on a virtual key, followed by adaptive load balancing (Enterprise), and finally a model-catalog resolver that falls back to the first configured provider that knows the model. Understanding this order lets you predict—and tune—exactly where each request goes.
+
+## The provider/model prefix format
+
+The simplest and most explicit way to route a request is to prefix the model name with `provider/`:
+
+```bash
+# Always goes to Anthropic, regardless of any other config
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "anthropic/claude-3-5-sonnet-20241022",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+
+# Always goes to OpenAI
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+
+# Routes to your self-hosted Ollama instance
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ollama/llama3.2",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+When you supply a provider prefix, Bifrost skips all provider-selection logic and jumps straight to key selection for that provider.
+
+## Bare model names and the model catalog
+
+When you send a bare model name without a prefix (e.g. `"model": "gpt-4o"`), Bifrost resolves the provider automatically:
+
+1. **Governance routing runs first** — if the incoming request carries a virtual key with `provider_configs`, those configs determine the candidate provider set and apply weighted selection.
+2. **Adaptive Load Balancing runs next** (Enterprise) — if no governance config pinned a provider, the enterprise load balancer scores configured providers by real-time performance and picks the best one.
+3. **Model-catalog resolver runs last** — if neither of the above set a provider, Bifrost queries its internal model catalog to find the first configured provider that supports the model.
+
+```bash
+# Bare model name — provider is resolved automatically
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+<Note>
+  For deterministic, production-grade routing use the explicit `provider/model`
+  format. Bare model names are convenient for local development and exploratory
+  use but depend on catalog state at runtime.
+</Note>
+
+## Governance routing with virtual keys
+
+Attaching `provider_configs` to a virtual key is the most powerful way to control routing. Each config entry specifies a provider, an optional model allowlist, a routing weight, and an optional set of allowed provider API keys.
+
+<Note>
+  A virtual key with **no** `provider_configs` entries uses deny-by-default
+  behavior—all providers are blocked. You must add at least one provider config
+  entry to allow traffic through a virtual key.
+</Note>
+
+### Configuring provider_configs
+
+```bash
+curl -X PUT http://localhost:8080/api/governance/virtual-keys/{vk_id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider_configs": [
+      {
+        "provider": "openai",
+        "allowed_models": ["gpt-4o", "gpt-4o-mini"],
+        "weight": 0.3,
+        "key_ids": ["*"]
+      },
+      {
+        "provider": "azure",
+        "allowed_models": ["gpt-4o"],
+        "weight": 0.7,
+        "key_ids": ["*"]
+      }
+    ]
+  }'
+```
+
+### How provider_configs affects routing
+
+With the config above, requests through this virtual key behave as follows:
+
+| Request model | Eligible providers | Traffic split |
+|---|---|---|
+| `gpt-4o` | OpenAI + Azure | 30% OpenAI, 70% Azure |
+| `gpt-4o-mini` | OpenAI only | 100% OpenAI |
+| `claude-3-5-sonnet-20241022` | None | ❌ Rejected (not in any allowlist) |
+
+<Tip>
+  Use `"allowed_models": ["*"]` to allow all models the provider supports
+  (validated via Bifrost's model catalog). An empty array `[]` denies all
+  models—this is the deny-by-default behavior.
+</Tip>
+
+### Bypassing load balancing with a provider prefix
+
+Even when a virtual key has `provider_configs` with weights, you can force a specific provider by including the prefix in the model name:
+
+```bash
+# Forces OpenAI regardless of the 70/30 weight split
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-YOUR_VIRTUAL_KEY" \
+  -d '{
+    "model": "openai/gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+<Warning>
+  An explicit `provider/model` prefix is still subject to the virtual key's
+  allowlist. If the provider is not in `provider_configs`, the request is
+  rejected with `403` even when the prefix is present.
+</Warning>
+
+## Automatic fallback chains
+
+When a virtual key has multiple providers configured and your request does not include a manual `fallbacks` array, Bifrost automatically builds a fallback chain sorted by weight (highest first). If the primary provider fails, Bifrost retries with the next provider in the chain without any action from your client.
+
+```bash
+# This request gets an auto-generated fallback chain: Azure first, then OpenAI
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-YOUR_VIRTUAL_KEY" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+```bash
+# Manual fallbacks — no automatic chain is added
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-YOUR_VIRTUAL_KEY" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "fallbacks": ["anthropic/claude-3-5-sonnet-20241022"]
+  }'
+```
+
+## Advanced routing options
+
+<CardGroup cols={2}>
+  <Card title="Routing Rules (Enterprise)" icon="code-branch" href="https://docs.getbifrost.ai/providers/routing-rules">
+    Write CEL expressions that inspect request headers, budget state, team ID, or message content to route dynamically at runtime—without changing your application code.
+  </Card>
+  <Card title="Complexity Router (Enterprise)" icon="brain" href="https://docs.getbifrost.ai/features/governance/complexity-router">
+    Automatically tier requests to cheap/fast models for simple prompts and expensive/capable models for complex ones, based on configurable complexity scoring.
+  </Card>
+  <Card title="Aliasing Models" icon="tag" href="https://docs.getbifrost.ai/providers/aliasing-models">
+    Map user-friendly model names to provider-specific deployment IDs (especially useful for Azure deployments and Bedrock inference profile ARNs).
+  </Card>
+  <Card title="Provider Routing (deep dive)" icon="map" href="https://docs.getbifrost.ai/providers/provider-routing">
+    Full technical reference covering the model catalog, governance and adaptive load balancing interaction, routing rules engine, and execution order.
+  </Card>
+</CardGroup>
+
+## Routing execution order
+
+Bifrost processes routing in this strict order for every request. Once a layer sets the provider, all later layers skip provider selection (but key selection always runs):
+
+<Steps>
+  <Step title="Governance routing rules">
+    CEL-based rules are evaluated first if configured. They can override the provider/model for the request.
+  </Step>
+  <Step title="Virtual key provider_configs (weighted selection)">
+    If the request carries a virtual key with provider configs, Bifrost performs weighted random provider selection and builds the fallback chain.
+  </Step>
+  <Step title="Adaptive Load Balancer — Level 1 (Enterprise)">
+    If no provider has been set yet, the enterprise load balancer selects the best-performing provider based on real-time error rates and latency.
+  </Step>
+  <Step title="Model-catalog resolver">
+    If the provider is still unset, Bifrost looks up the model in its catalog and picks the first configured provider that supports it.
+  </Step>
+  <Step title="Empty-provider validation">
+    If no provider could be determined, Bifrost returns `400` with a clear error asking you to use the `provider/model` format.
+  </Step>
+  <Step title="Key selection (always runs)">
+    Within the selected provider, Bifrost applies weighted random selection across eligible API keys, filtered by model allowlists. The Adaptive Load Balancer's Level 2 (Enterprise) replaces static key selection with performance-based key scoring.
+  </Step>
+</Steps>

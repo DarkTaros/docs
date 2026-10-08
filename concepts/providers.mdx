@@ -1,0 +1,174 @@
+---
+title: "Supported AI Providers and the Provider Support Matrix"
+sidebarTitle: "Providers"
+description: "Bifrost connects to 25+ AI providers—OpenAI, Anthropic, Azure, Bedrock, Gemini, Groq, and more—through one OpenAI-compatible API surface."
+---
+
+Bifrost sits between your application and every upstream AI provider, translating your requests into each provider's native format and normalizing all responses back to the OpenAI-compatible structure your code already knows. You register provider credentials once through the Bifrost API or dashboard, and from that point forward you address any model using the `provider/model-name` convention—no SDK changes required.
+
+## Adding provider keys
+
+Register a new API key for any provider with a single `POST` request. Bifrost stores the credential securely and immediately makes it available for load balancing and routing.
+
+```bash
+curl -X POST http://localhost:8080/api/providers/{provider}/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-openai-primary",
+    "value": "sk-...",
+    "models": ["gpt-4o", "gpt-4o-mini"],
+    "weight": 1.0
+  }'
+```
+
+Replace `{provider}` with the lowercase provider identifier from the table below (e.g. `openai`, `anthropic`, `bedrock`). The `models` array is your allowlist for that specific key—leave it as `["*"]` to allow all models the provider supports. See [Load Balancing](/concepts/load-balancing) for details on the `weight` field.
+
+## Targeting a specific provider
+
+You tell Bifrost which provider to use by prefixing the model name with `provider/`:
+
+```bash
+# Route explicitly to Anthropic
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "anthropic/claude-3-5-sonnet-20241022",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+
+# Route explicitly to OpenAI
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+
+# Route to a self-hosted Ollama instance
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ollama/llama3.2",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+<Tip>
+  Omitting the provider prefix (e.g. `"model": "gpt-4o"`) triggers Bifrost's
+  model-catalog resolver, which automatically picks a configured provider that
+  supports that model. For deterministic routing always use the explicit
+  `provider/model` format.
+</Tip>
+
+## Supported providers
+
+Bifrost ships built-in support for the following providers. Every provider is accessible through the same OpenAI-compatible endpoint—Bifrost handles all format translation internally.
+
+| Provider | Model prefix | Notes |
+|---|---|---|
+| **OpenAI** | `openai/<model>` | Full API coverage including Responses, Images, TTS, STT, Batch, Files |
+| **Anthropic** | `anthropic/<model>` | Chat, Responses, Batch, Files, passthrough |
+| **Azure OpenAI** | `azure/<model>` | Deployment-mapped keys; full feature parity with OpenAI |
+| **AWS Bedrock** | `bedrock/<model>` | Inference profiles, embeddings, rerank, image generation |
+| **AWS Bedrock Mantle** | `bedrock_mantle/<model>` | Alternative Bedrock access path |
+| **Google Gemini** | `gemini/<model>` | Chat, images, embeddings, TTS, STT, video, files, batch |
+| **Google Vertex AI** | `vertex/<model>` | Claude-on-Vertex, Gemini, embeddings, rerank |
+| **Groq** | `groq/<model>` | Chat, TTS, STT; text completions emulated internally |
+| **Mistral** | `mistral/<model>` | Chat, embeddings, STT, OCR |
+| **Cohere** | `cohere/<model>` | Chat, embeddings, rerank |
+| **DeepSeek** | `deepseek/<model>` | Chat and text completions |
+| **Ollama** | `ollama/<model>` | Self-hosted; chat, embeddings |
+| **Fireworks** | `fireworks/<model>` | Chat, text completions, embeddings |
+| **Replicate** | `replicate/<model>` | Chat, text, images, video, files |
+| **Perplexity** | `perplexity/<model>` | Chat only |
+| **xAI** | `xai/<model>` | Chat, text completions, images |
+| **Cerebras** | `cerebras/<model>` | Chat and text completions |
+| **Hugging Face** | `huggingface/<model>` | Chat, images, image edit, embeddings, TTS |
+| **OpenRouter** | `openrouter/<model>` | Multi-provider proxy; chat, embeddings |
+| **Nebius** | `nebius/<model>` | Chat, text completions, images, embeddings |
+| **vLLM** | `vllm/<model>` | Self-hosted; chat, embeddings, STT, rerank |
+| **SGLang** | `sgl/<model>` | Self-hosted; chat, embeddings |
+| **ElevenLabs** | `elevenlabs/<model>` | TTS and STT only |
+| **Parasail** | `parasail/<model>` | Chat only |
+| **Runware** | `runware/<model>` | Image generation, image edit, video |
+| **Runway ML** | `runway/<model>` | Video generation only |
+| **OpenCode** | `opencode/<model>` | Chat completions for code-focused workloads |
+| **Databricks AI Gateway** | `databricks/<model>` | Chat via Databricks-managed endpoint |
+
+<Note>
+  Don't see a provider you need? Bifrost supports **custom providers** that let you point to any OpenAI-compatible endpoint—on-premises deployments, internal proxies, or newly-launched inference services. See the [Custom Providers guide](https://docs.getbifrost.ai/providers/custom-providers) for details.
+</Note>
+
+## Consistent response format
+
+Regardless of which provider handles your request, Bifrost always returns an OpenAI-compatible response body. You never need to write provider-specific parsing logic:
+
+```bash
+# Request to Anthropic—response format is identical to OpenAI
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "anthropic/claude-3-5-sonnet-20241022",
+    "messages": [{"role": "user", "content": "What is 2 + 2?"}]
+  }'
+```
+
+```json
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "2 + 2 equals 4."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 14,
+    "completion_tokens": 10,
+    "total_tokens": 24
+  },
+  "extra_fields": {
+    "provider": "anthropic"
+  }
+}
+```
+
+The `extra_fields.provider` field in every response tells you which provider actually handled the request—useful for debugging and cost attribution.
+
+## Provider feature matrix
+
+Not every provider supports every operation. The table below summarizes key capability coverage. A full, always-current matrix is available at [docs.getbifrost.ai/providers/supported-providers/overview](https://docs.getbifrost.ai/providers/supported-providers/overview).
+
+| Provider | Chat | Streaming | Embeddings | Images | TTS / STT | Batch |
+|---|---|---|---|---|---|---|
+| OpenAI | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Anthropic | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Azure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Bedrock | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Gemini | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Vertex AI | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Groq | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ |
+| Mistral | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ |
+| Cohere | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| DeepSeek | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Ollama | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Fireworks | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| OpenRouter | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| vLLM | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ |
+| xAI | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Load Balancing" icon="scale-balanced" href="/concepts/load-balancing">
+    Distribute traffic across multiple keys for the same provider using weighted random selection.
+  </Card>
+  <Card title="Routing" icon="route" href="/concepts/routing">
+    Learn how provider-prefixed model names and virtual key configs control exactly where each request goes.
+  </Card>
+</CardGroup>

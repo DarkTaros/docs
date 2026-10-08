@@ -1,0 +1,281 @@
+---
+title: "AI Gateway Observability: Logs, Metrics, and Traces"
+sidebarTitle: "Observability"
+description: "Full visibility into every AI request: structured logs, Prometheus metrics, OpenTelemetry traces, cost tracking, and a built-in web UI dashboard."
+---
+
+Bifrost ships with observability built in — no extra agents, no third-party SaaS required to get started. Every request that flows through the gateway is logged, metered, and optionally traced. You can inspect individual calls in the web UI, scrape aggregated Prometheus metrics for Grafana dashboards, and export OpenTelemetry spans to any OTLP-compatible backend.
+
+## Request logs
+
+Bifrost stores a structured log entry for every request, including provider, model, latency, token usage, cost, virtual key, and routing decisions. You can query them via the REST API or browse them in the **Logs** tab of the web UI.
+
+### Querying logs via API
+
+```bash
+# Retrieve the 20 most recent log entries
+curl "http://localhost:8080/api/logs?limit=20"
+
+# Filter by provider and time range
+curl "http://localhost:8080/api/logs?provider=openai&limit=50"
+
+# Filter by virtual key
+curl "http://localhost:8080/api/logs?virtual_key_id=vk_abc123&limit=100"
+
+# Filter by model
+curl "http://localhost:8080/api/logs?model=gpt-4o-mini&limit=50"
+```
+
+A log entry looks like this:
+
+```json Example log entry
+{
+  "id": "log_01HV3...",
+  "timestamp": "2024-05-01T10:23:45.123Z",
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "method": "chat",
+  "status": "success",
+  "latency_ms": 843,
+  "input_tokens": 24,
+  "output_tokens": 118,
+  "cost_usd": 0.000042,
+  "virtual_key_id": "vk_abc123",
+  "virtual_key_name": "engineering-team",
+  "fallback_index": 0,
+  "routing_engines_used": ["governance", "loadbalancing"],
+  "cache_debug": {
+    "cache_hit": false
+  }
+}
+```
+
+### Web UI dashboard
+
+Open the Bifrost UI at `http://localhost:8080` to access the **Logs** tab. You can:
+
+- Browse all requests in real time with pagination
+- Filter by provider, model, virtual key, cache hit type, and status
+- Click any row to see the full request/response body, token usage, cost breakdown, routing decision trail, and cache debug info
+- Export log data for offline analysis
+
+## Prometheus metrics
+
+Bifrost exposes a Prometheus scrape endpoint at `/metrics`. All metrics are collected asynchronously — scraping never adds latency to your LLM calls.
+
+### Scraping configuration
+
+Add Bifrost to your `prometheus.yml`:
+
+```yaml prometheus.yml
+scrape_configs:
+  - job_name: "bifrost-gateway"
+    static_configs:
+      - targets: ["bifrost-instance-1:8080", "bifrost-instance-2:8080"]
+    scrape_interval: 30s
+    metrics_path: /metrics
+    # If Bifrost auth is enabled:
+    # basic_auth:
+    #   username: "<admin_username>"
+    #   password: "<admin_password>"
+```
+
+Then curl the endpoint to verify:
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+### Key metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `bifrost_upstream_requests_total` | Counter | Total requests forwarded to providers |
+| `bifrost_success_requests_total` | Counter | Successful provider responses |
+| `bifrost_error_requests_total` | Counter | Failed provider responses (labelled by `status_code`) |
+| `bifrost_upstream_latency_seconds` | Histogram | End-to-end provider latency |
+| `bifrost_input_tokens_total` | Counter | Input tokens consumed |
+| `bifrost_output_tokens_total` | Counter | Output tokens received |
+| `bifrost_cost_total` | Counter | Cumulative cost in USD |
+| `bifrost_cache_hits_total` | Counter | Cache hits by type (`direct` / `semantic`) |
+| `bifrost_active_requests` | Gauge | Requests currently in-flight |
+| `bifrost_stream_first_token_latency_seconds` | Histogram | Time to first token on streamed responses |
+| `bifrost_stream_inter_token_latency_seconds` | Histogram | Latency between subsequent streamed tokens |
+| `bifrost_request_retries` | Histogram | Retry count per request |
+| `bifrost_provider_key_up` | Gauge | Per-key health: `1` = healthy, `0` = last attempt failed |
+| `bifrost_key_rotation_events_total` | Counter | Key rotations triggered by rate-limit / auth / billing errors |
+| `http_requests_total` | Counter | Total HTTP requests to the gateway |
+| `http_request_duration_seconds` | Histogram | Gateway HTTP request latency |
+| `http_request_size_bytes` | Histogram | Size of incoming HTTP requests |
+| `http_response_size_bytes` | Histogram | Size of outgoing HTTP responses |
+
+All upstream metrics share a common set of base labels: `provider`, `model`, `alias`, `method`, `virtual_key_id`, `virtual_key_name`, `routing_engine_used`, `routing_rule_id`, `routing_rule_name`, `selected_key_id`, `selected_key_name`, `fallback_index`, `team_id`, `team_name`, `customer_id`, and `customer_name`.
+
+### Example PromQL queries
+
+<CodeGroup>
+```promql Success rate by provider
+rate(bifrost_success_requests_total[5m])
+  / rate(bifrost_upstream_requests_total[5m]) * 100
+```
+
+```promql Daily cost per provider
+sum by (provider) (increase(bifrost_cost_total[1d]))
+```
+
+```promql Cache hit rate by type
+sum by (cache_type) (rate(bifrost_cache_hits_total[5m]))
+  / rate(bifrost_upstream_requests_total[5m]) * 100
+```
+
+```promql P95 provider latency
+histogram_quantile(0.95,
+  sum by (le, provider) (
+    rate(bifrost_upstream_latency_seconds_bucket[5m])
+  )
+)
+```
+
+```promql Error rate alert threshold
+rate(bifrost_error_requests_total[5m])
+  / rate(bifrost_upstream_requests_total[5m]) > 0.05
+```
+</CodeGroup>
+
+### Grafana integration
+
+For local development, use the Docker Compose stack in the Bifrost repo to spin up Prometheus and Grafana pre-configured to scrape your gateway:
+
+```bash
+cd plugins/telemetry
+docker-compose up -d
+# Grafana: http://localhost:3000 (admin/admin)
+# Prometheus: http://localhost:9090
+# Bifrost metrics: http://localhost:8080/metrics
+```
+
+<Note>
+  The bundled Docker Compose setup is for development only. For production, deploy Prometheus and Grafana with proper persistence, retention policies, and authentication.
+</Note>
+
+### Adding custom dimensions
+
+Attach custom labels to every metric by declaring them in your config and injecting values at runtime via `x-bf-dim-*` request headers:
+
+```bash
+# Configure custom label names in config.json or via PATCH /config
+curl -X PATCH http://localhost:8080/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client": {
+      "prometheus_labels": ["team", "environment", "project"]
+    }
+  }'
+
+# Inject values per request
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-dim-team: engineering" \
+  -H "x-bf-dim-environment: production" \
+  -H "x-bf-dim-project: chat-assistant" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{ "role": "user", "content": "Hello!" }]
+  }'
+```
+
+These runtime dimensions flow through to Prometheus labels, OpenTelemetry span attributes, and internal log tags simultaneously.
+
+## OpenTelemetry tracing
+
+Bifrost emits a fully-attributed span for every LLM request — including retries and fallbacks — following [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/). Spans are exported via OTLP (HTTP or gRPC) to any compatible backend.
+
+### Supported backends
+
+<CardGroup cols={3}>
+  <Card title="Grafana Cloud / Tempo" icon="chart-area" />
+  <Card title="Datadog" icon="dog" />
+  <Card title="New Relic" icon="circle-check" />
+  <Card title="Honeycomb" icon="hexagon" />
+  <Card title="Langfuse" icon="language" />
+  <Card title="Self-hosted OTel Collector" icon="server" />
+</CardGroup>
+
+### Key span attributes
+
+| Category | Example attributes |
+|----------|--------------------|
+| Provider & model | `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model` |
+| Request parameters | `gen_ai.request.temperature`, `gen_ai.request.max_tokens` |
+| Usage & cost | `gen_ai.usage.prompt_tokens`, `gen_ai.usage.completion_tokens`, `gen_ai.usage.cost` |
+| Bifrost context | `gen_ai.virtual_key_id`, `gen_ai.team_id`, `gen_ai.number_of_retries` |
+| Input / output | `gen_ai.input.messages`, `gen_ai.output.messages` |
+
+### Injecting custom span attributes
+
+Use `x-bf-eh-*` headers to attach custom attributes to the `llm.call` span:
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-eh-session-id: sess-abc-123" \
+  -H "x-bf-eh-tenant-id: acme-corp" \
+  -d '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [{ "role": "user", "content": "Hello!" }]
+  }'
+```
+
+This produces `gen_ai.request.extra_header.session-id` and `gen_ai.request.extra_header.tenant-id` on the span, which you can then filter and group by in your tracing UI.
+
+## Production alerting examples
+
+```yaml prometheus-alerts.yml
+groups:
+  - name: bifrost
+    rules:
+      - alert: BifrostHighErrorRate
+        expr: >
+          sum by (provider) (rate(bifrost_error_requests_total[5m]))
+          / sum by (provider) (rate(bifrost_upstream_requests_total[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate for {{ $labels.provider }}: {{ $value | humanizePercentage }}"
+
+      - alert: BifrostDailyCostThreshold
+        expr: sum by (provider) (increase(bifrost_cost_total[1d])) > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Daily spend for {{ $labels.provider }} exceeded $100"
+
+      - alert: BifrostLowCacheHitRate
+        expr: >
+          sum by (provider) (rate(bifrost_cache_hits_total[15m]))
+          / sum by (provider) (rate(bifrost_upstream_requests_total[15m])) < 0.1
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Cache hit rate for {{ $labels.provider }} below 10%"
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Budget & Rate Limits" icon="shield-halved" href="/features/budget-rate-limits">
+    Enforce spend caps and surface budget-exceeded errors in your dashboards.
+  </Card>
+  <Card title="Semantic Caching" icon="database" href="/features/semantic-caching">
+    Reduce costs and improve cache hit metrics with intelligent response reuse.
+  </Card>
+  <Card title="Automatic Fallbacks" icon="arrows-rotate" href="/features/automatic-fallbacks">
+    Monitor fallback frequency and which providers serve requests during outages.
+  </Card>
+  <Card title="Plugins" icon="puzzle-piece" href="/features/plugins">
+    Use PostLLMHook to forward custom telemetry data to any backend.
+  </Card>
+</CardGroup>

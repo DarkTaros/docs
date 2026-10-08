@@ -1,0 +1,269 @@
+---
+title: "Images API: Generate, Edit, and Vary Images via Bifrost"
+sidebarTitle: "Images"
+description: "Use POST /v1/images/generations, /edits, and /variations to create, modify, and remix images through any supported image-generation provider."
+---
+
+Bifrost exposes three image endpoints that mirror the OpenAI image API shape. You can generate images from text prompts, edit an existing image with a masked region and a new prompt, or create stylistic variations of a source image. All three endpoints use `provider/model` format, so you can target DALL·E, Stable Diffusion, or any other configured model without changing your client code.
+
+## Generate an Image
+
+Create a brand-new image from a text description.
+
+```
+POST http://your-host:8080/v1/images/generations
+```
+
+### Request Parameters
+
+<ParamField header="x-bf-vk" type="string">
+  Your Bifrost virtual key. Alternatively, pass via `Authorization: Bearer`, `x-api-key`, or `x-goog-api-key`.
+</ParamField>
+
+<ParamField body="model" type="string" required>
+  The image model in `provider/model` format.
+
+  **Examples:**
+  - `openai/dall-e-3`
+  - `openai/gpt-image-1`
+  - `bedrock/stability.stable-diffusion-xl-v1`
+</ParamField>
+
+<ParamField body="prompt" type="string" required>
+  A text description of the image you want to generate. More detail generally yields better results. Maximum length varies by model.
+</ParamField>
+
+<ParamField body="n" type="integer" default="1">
+  Number of images to generate. Must be between `1` and `10`. DALL·E 3 only supports `n=1`.
+</ParamField>
+
+<ParamField body="size" type="string" default="1024x1024">
+  Dimensions of the output image. Supported options depend on the model:
+
+  `256x256` · `512x512` · `1024x1024` · `1792x1024` · `1024x1792` · `1536x1024` · `1024x1536` · `auto`
+</ParamField>
+
+<ParamField body="quality" type="string" default="auto">
+  Quality of the generated image. Options: `auto`, `high`, `medium`, `low`, `hd`, `standard`. Not all models support every value.
+</ParamField>
+
+<ParamField body="style" type="string">
+  Image style. Options: `natural`, `vivid`. Supported by DALL·E 3 only.
+</ParamField>
+
+<ParamField body="response_format" type="string" default="url">
+  How the image is returned. Use `url` for a temporary download link, or `b64_json` for an inline Base64-encoded PNG.
+</ParamField>
+
+<ParamField body="output_format" type="string">
+  Output file format: `png`, `webp`, or `jpeg`.
+</ParamField>
+
+<ParamField body="output_compression" type="integer">
+  Compression level from `0` (no compression) to `100` (maximum compression). Applies to JPEG and WebP output.
+</ParamField>
+
+<ParamField body="background" type="string">
+  Background type. Options: `transparent`, `opaque`, `auto`. Transparent backgrounds require a format that supports alpha (PNG or WebP).
+</ParamField>
+
+<ParamField body="seed" type="integer">
+  A fixed seed for reproducible generation (model support varies).
+</ParamField>
+
+<ParamField body="negative_prompt" type="string">
+  Describe what the model should avoid in the generated image (supported by Stable Diffusion and similar models).
+</ParamField>
+
+<ParamField body="stream" type="boolean" default="false">
+  When `true`, partial images are streamed as SSE events. Useful for showing progressive previews in your UI.
+</ParamField>
+
+<ParamField body="fallbacks" type="array">
+  Ordered list of fallback models in `provider/model` format. Bifrost retries each fallback if the primary model fails.
+</ParamField>
+
+### Example: Generate an image
+
+<CodeGroup>
+
+```bash cURL
+curl http://your-host:8080/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-your-virtual-key" \
+  -d '{
+    "model": "openai/dall-e-3",
+    "prompt": "A photorealistic aerial view of a futuristic city at dusk, with neon-lit bridges and flying vehicles.",
+    "n": 1,
+    "size": "1024x1024",
+    "quality": "hd",
+    "response_format": "url"
+  }'
+```
+
+```python Python (OpenAI SDK)
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://your-host:8080/v1",
+    api_key="sk-bf-your-virtual-key",
+)
+
+response = client.images.generate(
+    model="openai/dall-e-3",
+    prompt="A photorealistic aerial view of a futuristic city at dusk, with neon-lit bridges and flying vehicles.",
+    n=1,
+    size="1024x1024",
+    quality="hd",
+)
+print(response.data[0].url)
+```
+
+</CodeGroup>
+
+### Example response
+
+```json
+{
+  "id": "imggen-7tKpL2mNxQvR",
+  "created": 1720000100,
+  "model": "dall-e-3",
+  "data": [
+    {
+      "index": 0,
+      "url": "https://oaidalleapiprodscus.blob.core.windows.net/private/...",
+      "revised_prompt": "A photorealistic aerial view of a futuristic city at dusk, featuring neon-lit suspension bridges and sleek flying vehicles weaving between glass skyscrapers."
+    }
+  ],
+  "quality": "hd",
+  "usage": {
+    "input_tokens": 22,
+    "output_tokens": 4096,
+    "total_tokens": 4118
+  },
+  "extra_fields": {
+    "request_type": "image_generation",
+    "model_requested": "openai/dall-e-3",
+    "model_deployment": "openai/dall-e-3",
+    "latency": 8741
+  }
+}
+```
+
+<Note>
+  The `revised_prompt` field is populated by DALL·E 3 when the model internally rephrases your prompt for better results. It is absent for other models.
+</Note>
+
+---
+
+## Edit an Image
+
+Modify a specific region of an existing image using a prompt and an optional mask.
+
+```
+POST http://your-host:8080/v1/images/edits
+```
+
+You must submit the request as `multipart/form-data`. The `image` field contains the source PNG (max 4 MB). The optional `mask` field is a same-size PNG where fully transparent pixels mark the area to be filled in.
+
+### Example: Edit an image
+
+```bash
+curl http://your-host:8080/v1/images/edits \
+  -H "x-bf-vk: sk-bf-your-virtual-key" \
+  -F "model=openai/dall-e-2" \
+  -F "image=@/path/to/original.png" \
+  -F "mask=@/path/to/mask.png" \
+  -F "prompt=Replace the sky with a dramatic sunset" \
+  -F "n=1" \
+  -F "size=1024x1024"
+```
+
+---
+
+## Create a Variation
+
+Generate one or more stylistic variations of an existing image without any text prompt.
+
+```
+POST http://your-host:8080/v1/images/variations
+```
+
+Submit as `multipart/form-data` with the source PNG in the `image` field.
+
+### Example: Create a variation
+
+```bash
+curl http://your-host:8080/v1/images/variations \
+  -H "x-bf-vk: sk-bf-your-virtual-key" \
+  -F "model=openai/dall-e-2" \
+  -F "image=@/path/to/source.png" \
+  -F "n=2" \
+  -F "size=512x512" \
+  -F "response_format=url"
+```
+
+## Response Fields
+
+<ResponseField name="id" type="string">
+  Unique identifier for the generation request.
+</ResponseField>
+
+<ResponseField name="created" type="integer">
+  Unix timestamp of when the image was created.
+</ResponseField>
+
+<ResponseField name="model" type="string">
+  The model that served the request.
+</ResponseField>
+
+<ResponseField name="data" type="array">
+  Array of image objects, one per generated image.
+
+  <Expandable title="Image object fields">
+    <ResponseField name="url" type="string">
+      Temporary URL pointing to the generated image. Valid for a limited time (typically 1 hour).
+    </ResponseField>
+    <ResponseField name="b64_json" type="string">
+      Base64-encoded image data. Present when `response_format` is `b64_json`.
+    </ResponseField>
+    <ResponseField name="revised_prompt" type="string">
+      The prompt actually used by the model (DALL·E 3 only).
+    </ResponseField>
+    <ResponseField name="index" type="integer">
+      Zero-based index of this image in the response.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="usage" type="object">
+  Token and cost information for the request.
+</ResponseField>
+
+## Error Responses
+
+| Status | Meaning |
+|---|---|
+| `400` | Missing `prompt` or `model`, invalid `size`, or malformed multipart body |
+| `403` | Virtual key lacks permission for the requested image provider |
+| `500` | Upstream provider error or generation failure |
+
+```json
+{
+  "event_id": "evt_05jkl",
+  "type": "error",
+  "is_bifrost_error": false,
+  "status_code": 400,
+  "error": {
+    "type": "invalid_request_error",
+    "code": "invalid_size",
+    "message": "Size '2048x2048' is not supported for model dall-e-3.",
+    "param": "size",
+    "event_id": "evt_05jkl"
+  },
+  "extra_fields": {
+    "model_requested": "openai/dall-e-3",
+    "request_type": "image_generation"
+  }
+}
+```

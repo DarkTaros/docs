@@ -1,0 +1,277 @@
+---
+title: "Deploy the Bifrost HTTP Gateway with Built-in Web UI"
+sidebarTitle: "HTTP Gateway"
+description: "Run the Bifrost HTTP gateway with a built-in web UI for visual provider configuration, real-time monitoring, and an OpenAI-compatible API."
+---
+
+The Bifrost HTTP gateway is a standalone server process that exposes a unified, OpenAI-compatible REST API on port `8080`. It ships with a built-in web dashboard for adding provider keys, monitoring requests in real time, and managing governance — all without editing config files. Any language or framework that can make an HTTP request can integrate with it in minutes.
+
+## Run the gateway
+
+You can start the gateway with Docker or the `npx` binary. Both expose identical functionality.
+
+<CodeGroup>
+
+```bash Docker
+# Run with default settings
+docker run -p 8080:8080 maximhq/bifrost
+
+# Persist configuration and logs across restarts
+docker run -p 8080:8080 -v $(pwd)/data:/app/data maximhq/bifrost
+
+# Pin to a specific release
+docker run -p 8080:8080 maximhq/bifrost:v1.3.9
+```
+
+```bash npx
+# Run with default settings
+npx -y @maximhq/bifrost
+
+# Pin to a specific release
+npx -y @maximhq/bifrost --transport-version v1.3.9
+```
+
+</CodeGroup>
+
+Once started, the gateway is available at `http://localhost:8080` and the API base URL is:
+
+```
+http://localhost:8080/v1/
+```
+
+### Configuration flags
+
+You can tune the gateway at startup using flags (npx) or environment variables (Docker):
+
+| Setting | Default | npx flag | Docker env var |
+|---|---|---|---|
+| Port | `8080` | `-port 8080` | `-e APP_PORT=8080` |
+| Host | `localhost` | `-host 0.0.0.0` | `-e APP_HOST=0.0.0.0` |
+| Log level | `info` | `-log-level info` | `-e LOG_LEVEL=info` |
+| Log style | `json` | `-log-style json` | `-e LOG_STYLE=pretty` |
+
+<Note>
+  When using Docker, the mounted volume acts as Bifrost's app directory. It stores `config.db` (provider configuration), `logs.db` (request history), and an optional `config.json` file. Without a volume mount, data is lost when the container stops.
+</Note>
+
+---
+
+## The web UI
+
+Open **[http://localhost:8080](http://localhost:8080)** in your browser after starting the gateway. The dashboard is available immediately — no login required by default.
+
+From the web UI you can:
+
+- **Add and manage provider keys** — navigate to **Model Providers** in the sidebar
+- **Monitor requests in real time** — view latency, token usage, and error rates
+- **Configure governance** — set up virtual keys, budgets, and rate limits
+- **Adjust provider settings** — concurrency, retries, proxy, and more
+
+Changes you make in the UI are stored in a local SQLite database and take effect immediately without restarting the gateway.
+
+<Tip>
+  To password-protect the dashboard, go to **Workspace → Config → Security** and enable **Password protect the dashboard**. You can optionally keep inference endpoints (like `/v1/chat/completions`) unauthenticated while protecting the admin UI.
+</Tip>
+
+---
+
+## Add a provider key
+
+Before you can route requests to an AI provider, you need to register at least one API key. You can do this through the web UI, the management API, or a `config.json` file.
+
+<Steps>
+
+### Via the web UI
+
+1. Open [http://localhost:8080](http://localhost:8080) and go to **Model Providers**.
+2. Select your provider (for example, **OpenAI**).
+3. Click **Add Key**, enter a name and your API key, then save.
+
+### Via the management API
+
+```bash
+curl -X POST http://localhost:8080/api/providers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "openai",
+    "keys": [
+      {
+        "name": "openai-key-1",
+        "value": "sk-...",
+        "models": ["*"],
+        "weight": 1.0
+      }
+    ]
+  }'
+```
+
+Setting `"models": ["*"]` allows this key to be used for any model offered by the provider. You can restrict it to specific models by listing them explicitly, for example `["gpt-4o", "gpt-4o-mini"]`.
+
+### Via environment variable reference
+
+Instead of pasting a raw key, you can tell Bifrost to read from an environment variable at runtime:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+```bash
+curl -X POST http://localhost:8080/api/providers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "openai",
+    "keys": [
+      {
+        "name": "openai-key-1",
+        "value": "env.OPENAI_API_KEY",
+        "models": ["*"],
+        "weight": 1.0
+      }
+    ]
+  }'
+```
+
+<Note>
+  API key values are automatically redacted in GET responses and the web UI. You never see a raw key after it has been saved.
+</Note>
+
+</Steps>
+
+---
+
+## Make requests
+
+Once a provider is configured, you can send requests to Bifrost using any HTTP client. All requests follow the OpenAI chat completions format, and the `model` field accepts a `provider/model-name` string to explicitly target a provider.
+
+### Chat completion
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "What is Bifrost?"}
+    ]
+  }'
+```
+
+### Route to a different provider
+
+Switching providers requires only a model string change — your code stays the same:
+
+<CodeGroup>
+
+```bash Anthropic
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "anthropic/claude-3-5-haiku-20241022",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+```bash OpenAI
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+```bash Groq
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "groq/llama-3.3-70b-versatile",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+</CodeGroup>
+
+<Tip>
+  You can also use bare model names like `gpt-4o-mini` without the provider prefix. Bifrost will resolve the provider automatically using its built-in model catalog.
+</Tip>
+
+---
+
+## Configuration modes
+
+Bifrost supports two configuration approaches depending on your workflow:
+
+| Mode | When to use | Behaviour |
+|---|---|---|
+| **Web UI / Database** (default) | You want to manage config from the dashboard or API | Configuration is stored in SQLite (or PostgreSQL). An optional `config.json` seeds the database on first boot. |
+| **File-only `config.json`** | GitOps, CI/CD, or no-UI deployments | Bifrost loads config from file at startup. UI and management API edits are disabled. Changes require a restart. |
+
+### File-only example
+
+Create a `config.json` in your app directory and set `config_store.enabled` to `false`:
+
+```json
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "providers": {
+    "openai": {
+      "keys": [
+        {
+          "name": "openai-key-1",
+          "value": "env.OPENAI_API_KEY",
+          "models": ["*"],
+          "weight": 1.0
+        }
+      ]
+    }
+  },
+  "config_store": {
+    "enabled": false
+  }
+}
+```
+
+<Warning>
+  In file-only mode, the configuration UI and management API are not available. All changes must be made in `config.json` and require a gateway restart to take effect.
+</Warning>
+
+---
+
+## Advanced provider settings
+
+From the **Model Providers → Configurations** section of the web UI (or via `POST /api/providers`), you can fine-tune each provider:
+
+<CardGroup cols={2}>
+  <Card title="Weighted load balancing" icon="scale-balanced">
+    Distribute traffic across multiple API keys using custom weights — for example, 70% to one key and 30% to another.
+  </Card>
+  <Card title="Model-specific keys" icon="key">
+    Assign different API keys to different models on the same provider, useful for separating billing or access tiers.
+  </Card>
+  <Card title="Retries & backoff" icon="rotate">
+    Configure max retries, initial backoff, and maximum backoff to handle transient failures and rate limits gracefully.
+  </Card>
+  <Card title="Custom base URL" icon="link">
+    Override the default provider endpoint to route to self-hosted models (vLLM, Ollama) or OpenAI-compatible APIs.
+  </Card>
+</CardGroup>
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    See the end-to-end guide including Python and Node.js SDK examples.
+  </Card>
+  <Card title="Go SDK" icon="golang" href="/gateway/go-sdk">
+    Embed Bifrost as a library directly inside a Go application.
+  </Card>
+  <Card title="Retries & Fallbacks" icon="shield-check" href="/features/automatic-fallbacks">
+    Configure automatic failover between providers and models.
+  </Card>
+  <Card title="Governance" icon="lock" href="/concepts/virtual-keys">
+    Set up virtual keys, usage budgets, and per-consumer rate limits.
+  </Card>
+</CardGroup>

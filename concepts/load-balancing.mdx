@@ -1,0 +1,204 @@
+---
+title: "Load Balancing: Distribute Traffic Across Provider Keys"
+sidebarTitle: "Load Balancing"
+description: "Bifrost distributes traffic across multiple provider API keys using weighted random selection, model allowlists, and automatic failover when any key fails."
+---
+
+When you register more than one API key for a provider, Bifrost automatically load-balances requests across them. Each key carries a numeric weight that determines its share of traffic. A key with weight `0.7` receives roughly 70% of requests; one with weight `0.3` receives the remaining 30%. When a selected key fails, Bifrost falls back to the next eligible key without any retry logic in your application.
+
+## How weighted selection works
+
+Bifrost's selection algorithm runs once per request, per provider call attempt:
+
+1. Collect all keys registered for the target provider.
+2. Filter out keys whose model allowlist does not include the requested model.
+3. Filter out keys on the denylist for the requested model (`blacklisted_models`).
+4. Calculate the cumulative weight of the remaining eligible keys.
+5. Generate a random number in `[0, total_weight)` and select the key whose cumulative weight range it falls into.
+6. If the selected key fails (network error, rate limit, etc.), automatically retry with the next available key.
+
+Because selection is random, the distribution converges to the configured weights **statistically** over many requests—it is not round-robin and any individual request may go to either key.
+
+```
+Key A: weight 0.7  →  ~70% of requests over time
+Key B: weight 0.3  →  ~30% of requests over time
+
+Total weight: 1.0 (weights need not sum to 1.0—Bifrost normalizes automatically)
+```
+
+<Tip>
+  Use higher weights for keys with better rate limits or lower latency (e.g. an
+  enterprise-tier key vs. a free-tier key). Use a weight of `0.0` or remove a
+  key to temporarily stop routing traffic to it.
+</Tip>
+
+## Adding multiple keys for a provider
+
+Register keys one at a time via `POST /api/providers/{provider}/keys`. Each call adds an independent key that participates in load balancing from the moment it is created.
+
+<CodeGroup>
+
+```bash Primary key (70% weight)
+curl -X POST http://localhost:8080/api/providers/openai/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "openai-primary",
+    "value": "sk-prod-AAAA...",
+    "models": ["gpt-4o", "gpt-4o-mini"],
+    "weight": 0.7
+  }'
+```
+
+```bash Secondary key (30% weight)
+curl -X POST http://localhost:8080/api/providers/openai/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "openai-backup",
+    "value": "sk-prod-BBBB...",
+    "models": ["gpt-4o", "gpt-4o-mini"],
+    "weight": 0.3
+  }'
+```
+
+</CodeGroup>
+
+After both keys are registered, every `openai/gpt-4o` request is automatically distributed 70/30 across them—no additional configuration needed.
+
+## Model allowlists and denylists
+
+Every key can carry its own model allowlist and denylist, giving you fine-grained control over which keys serve which models:
+
+| Field | Value | Behavior |
+|---|---|---|
+| `models` | `["*"]` | Key may serve all models the provider supports |
+| `models` | `["gpt-4o"]` | Key may only serve `gpt-4o` |
+| `models` | `[]` (empty) | Key is excluded from all requests (deny-by-default since v1.5.0) |
+| `blacklisted_models` | `["gpt-4o-mini"]` | Key is excluded for `gpt-4o-mini` even if `models` allows it |
+
+**Example — dedicated keys by model tier:**
+
+```bash
+# Premium key: only handles expensive models
+curl -X POST http://localhost:8080/api/providers/openai/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "openai-premium",
+    "value": "sk-premium-...",
+    "models": ["gpt-4o", "o1-preview"],
+    "weight": 1.0
+  }'
+
+# Standard key: only handles cheaper models
+curl -X POST http://localhost:8080/api/providers/openai/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "openai-standard",
+    "value": "sk-standard-...",
+    "models": ["gpt-4o-mini", "gpt-3.5-turbo"],
+    "weight": 1.0
+  }'
+
+# Shared key with an explicit denylist
+curl -X POST http://localhost:8080/api/providers/openai/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "openai-shared",
+    "value": "sk-shared-...",
+    "models": ["gpt-4o", "gpt-4o-mini"],
+    "blacklisted_models": ["gpt-4o-mini"],
+    "weight": 0.5
+  }'
+```
+
+When a request for `gpt-4o` arrives, Bifrost only considers keys whose `models` list includes `gpt-4o`—the standard key is automatically excluded from the selection pool.
+
+## Automatic failover
+
+If a key fails after selection (e.g. the upstream API returns a rate-limit error or network timeout), Bifrost automatically falls back to the next eligible key without bubbling the error to your client. The fallback sequence visits remaining keys in order of decreasing weight.
+
+```
+Request for gpt-4o:
+  1. Select openai-primary (weight 0.7) → upstream returns 429
+  2. Automatically fall back to openai-backup (weight 0.3) → ✅ success
+  Client receives a successful response — no retry needed
+```
+
+<Note>
+  Failover applies to key-level failures. If you need cross-provider fallback
+  (e.g. fall back from OpenAI to Azure when all OpenAI keys fail), configure
+  multiple providers in your virtual key's `provider_configs`. See
+  [Routing](/concepts/routing) for details.
+</Note>
+
+## Deployment mapping (Azure and Bedrock)
+
+For providers that use deployment-based routing, Bifrost validates that a key has the correct deployment mapping before selecting it:
+
+**Azure** — each key maps user-facing model names to Azure deployment names:
+
+```json
+{
+  "name": "azure-prod",
+  "value": "your-azure-api-key",
+  "aliases": {
+    "gpt-4o": "my-prod-gpt4o-deployment",
+    "gpt-4o-mini": "my-mini-deployment"
+  },
+  "azure_key_config": {
+    "endpoint": "https://your-resource.openai.azure.com"
+  }
+}
+```
+
+**AWS Bedrock** — aliases map short names to full inference profile ARNs:
+
+```json
+{
+  "name": "bedrock-prod",
+  "aliases": {
+    "claude-sonnet": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "claude-opus": "us.anthropic.claude-3-opus-20240229-v1:0"
+  },
+  "bedrock_key_config": {
+    "access_key": "AKIA...",
+    "secret_key": "your-secret",
+    "region": "us-east-1"
+  }
+}
+```
+
+Keys without a required deployment mapping are silently excluded from the selection pool for that model, so traffic is never sent to a misconfigured key.
+
+## Pinning a request to a specific key
+
+You can bypass weighted selection and target a named key directly using the `x-bf-api-key` header (by name) or `x-bf-api-key-id` header (by ID). When either header is present, Bifrost skips weighted distribution and uses the referenced key directly.
+
+```bash
+# Route this specific request to "openai-primary" only
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-api-key: openai-primary" \
+  -d '{
+    "model": "openai/gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+<Warning>
+  When you pin to a specific key name or ID, weighted load balancing is
+  bypassed entirely. Model allowlists and denylists on the referenced key are
+  still enforced—if the key does not support the requested model, the request
+  fails.
+</Warning>
+
+## Adaptive Load Balancing (Enterprise)
+
+Static weights are easy to configure but don't react to real-time provider performance. Bifrost Enterprise adds **Adaptive Load Balancing**, which replaces static weights with a continuously-updated performance score computed from:
+
+- **Error rate** — the primary signal; time-decayed so recovering keys regain traffic quickly.
+- **Token-aware latency** — compared both to peer keys and to the key's own recent baseline.
+- **Utilization** — a minor fair-share nudge that prevents one key from being overloaded.
+
+The score is recomputed every **5 seconds**. Keys that are failing are penalized heavily; once issues resolve, the penalty decays within ~30 seconds so recovered keys return to full traffic without manual intervention.
+
+[Learn more about Adaptive Load Balancing →](/enterprise/overview)

@@ -1,0 +1,254 @@
+---
+title: "Immutable Audit Logs for SOC 2 and HIPAA Compliance"
+sidebarTitle: "Audit Logs"
+description: "Tamper-proof, HMAC-signed audit trails for every configuration change—filterable, exportable, and aligned with SOC 2, HIPAA, GDPR, and ISO 27001."
+---
+
+Bifrost Enterprise records every administrative action as an immutable, timestamped audit event. Each entry captures who performed the action, what resource was affected, the outcome, and contextual metadata like IP address, request path, and duration. Events can be signed with an HMAC key so downstream consumers can verify that no record has been altered after the fact.
+
+Audit logs are designed to satisfy the logging requirements of the most common compliance frameworks your security team encounters.
+
+<CardGroup cols={2}>
+  <Card title="SOC 2 Type II" icon="shield-check">
+    Continuous evidence of access controls, change management, and incident response across the audit period.
+  </Card>
+  <Card title="HIPAA" icon="hospital">
+    Activity logs and access records required under the HIPAA Security Rule's audit controls standard (§164.312(b)).
+  </Card>
+  <Card title="GDPR" icon="scale-balanced">
+    Accountability and traceability records to demonstrate lawful processing and respond to data subject access requests.
+  </Card>
+  <Card title="ISO 27001" icon="certificate">
+    Logging and monitoring evidence required by Annex A control A.12.4 (Logging and Monitoring).
+  </Card>
+</CardGroup>
+
+## What audit logs capture
+
+Every audit log entry records the following fields:
+
+| Field | Description |
+|---|---|
+| **Time** | ISO 8601 timestamp of when the event occurred |
+| **Action** | The operation performed: `create`, `update`, `delete`, `authenticate`, `authorize`, `export`, or `import` |
+| **Outcome** | `success`, `failure`, or `pending` |
+| **Initiator** | The user account, API key, or system actor that triggered the action |
+| **Target** | The resource affected—virtual key ID, provider name, role name, etc. |
+| **Path** | HTTP method and request path, when available |
+| **IP** | Client IP address, when available |
+| **Duration** | Request duration in milliseconds, when available |
+| **Signature** | HMAC-SHA256 signature over the entry payload, when `hmac_key` is configured |
+
+## Enabling and configuring audit logs
+
+Add an `audit_logs` block to your `config.json`. Audit logging is enabled by default—you only need to configure it if you want HMAC signing or a custom retention period.
+
+```json
+{
+  "audit_logs": {
+    "disabled": false,
+    "hmac_key": "env.AUDIT_HMAC_KEY",
+    "retention_days": 365
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `disabled` | boolean | Set to `true` to turn off audit logging entirely. Default: `false`. |
+| `hmac_key` | string | HMAC secret used to sign every audit entry. Minimum 32 bytes. Use `env.` prefix to read from an environment variable (e.g. `env.AUDIT_HMAC_KEY`). |
+| `retention_days` | integer | Days to retain entries. Set to `0` to disable retention-based cleanup. |
+
+<Warning>
+  Store your HMAC key in a secrets manager or environment variable—never hardcode it in `config.json`. Rotating the key does not retroactively re-sign older entries; plan your key rotation policy accordingly.
+</Warning>
+
+## Viewing audit logs in the dashboard
+
+Open **Governance → Audit Logs** in the Bifrost dashboard. The table is searchable and filterable:
+
+- **Search** by initiator name, target resource, IP address, or request path.
+- **Filter** by action type (create, update, delete, authenticate, etc.).
+- **Filter** by outcome (success, failure, pending).
+- **Filter** by date range using the start date and end date pickers.
+
+## Querying audit logs via API
+
+Use the REST API to query logs programmatically—useful for building dashboards, feeding SIEMs, or running automated compliance checks.
+
+<CodeGroup>
+```bash List audit logs
+curl -X GET "http://localhost:8080/api/audit-logs" \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "Content-Type: application/json"
+```
+
+```bash List with filters
+curl -X GET "http://localhost:8080/api/audit-logs?\
+action=delete&\
+outcome=success&\
+start_date=2024-01-01T00:00:00Z&\
+end_date=2024-01-31T23:59:59Z&\
+limit=100&\
+offset=0" \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+```json Example response
+{
+  "count": 3,
+  "limit": 100,
+  "offset": 0,
+  "entries": [
+    {
+      "id": "evt_01HX9K2M3N4P5Q6R7S8T9U0V",
+      "timestamp": "2024-01-15T14:32:07.841Z",
+      "action": "delete",
+      "outcome": "success",
+      "initiator": {
+        "type": "user",
+        "id": "usr_abc123",
+        "name": "alice@example.com"
+      },
+      "target": {
+        "type": "virtual_key",
+        "id": "vk_xyz789",
+        "name": "production-key-gpt4"
+      },
+      "path": "DELETE /api/virtual-keys/vk_xyz789",
+      "ip": "203.0.113.42",
+      "duration_ms": 23,
+      "signature": "sha256=a1b2c3d4e5f6..."
+    }
+  ]
+}
+```
+</CodeGroup>
+
+## Exporting audit logs
+
+Users with the `AuditLogs:Download` permission can export the currently filtered audit log view. Bifrost supports three export formats:
+
+| Format | Best for |
+|---|---|
+| **JSON** | Structured review, ad hoc processing, and manual inspection |
+| **JSON Lines** | Line-delimited ingestion pipelines (Splunk, Elasticsearch, etc.) |
+| **Syslog (RFC 5424)** | SIEM and log-forwarding pipelines that accept syslog records |
+
+### Export via API
+
+<CodeGroup>
+```bash Request export
+curl -X POST "http://localhost:8080/api/audit-logs/export" \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "format": "jsonl",
+    "filters": {
+      "start_date": "2024-01-01T00:00:00Z",
+      "end_date": "2024-01-31T23:59:59Z",
+      "action": "delete",
+      "outcome": "success"
+    }
+  }'
+```
+
+```json Export response
+{
+  "export_id": "exp_01HX9K2M3N4P5Q6R7S8",
+  "status": "pending",
+  "format": "jsonl",
+  "created_at": "2024-01-31T09:00:00Z",
+  "download_url": null
+}
+```
+
+```bash Poll export status
+curl -X GET "http://localhost:8080/api/audit-logs/export/exp_01HX9K2M3N4P5Q6R7S8" \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+```json Completed export
+{
+  "export_id": "exp_01HX9K2M3N4P5Q6R7S8",
+  "status": "complete",
+  "format": "jsonl",
+  "entry_count": 1284,
+  "created_at": "2024-01-31T09:00:00Z",
+  "completed_at": "2024-01-31T09:00:12Z",
+  "download_url": "https://bifrost.example.com/api/audit-logs/export/exp_01HX9K2M3N4P5Q6R7S8/download"
+}
+```
+</CodeGroup>
+
+## Verifying entry signatures
+
+When `hmac_key` is configured, every audit log entry includes a `signature` field containing an HMAC-SHA256 digest of the entry payload. You can verify this independently to confirm that no entry has been tampered with.
+
+```bash
+curl -X POST "http://localhost:8080/api/audit-logs/verify" \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "entry_id": "evt_01HX9K2M3N4P5Q6R7S8T9U0V",
+    "signature": "sha256=a1b2c3d4e5f6..."
+  }'
+```
+
+```json
+{
+  "entry_id": "evt_01HX9K2M3N4P5Q6R7S8T9U0V",
+  "valid": true,
+  "verified_at": "2024-01-31T10:00:00Z"
+}
+```
+
+<Note>
+  Signature verification uses the `hmac_key` currently configured in Bifrost. If you rotated the key after the entry was written, verification will fail for entries signed with the previous key. Archive the signed entries before rotating.
+</Note>
+
+## Compliance checklist
+
+Use this checklist when preparing for a compliance audit:
+
+<AccordionGroup>
+  <Accordion title="SOC 2 — CC6.1 and CC6.3 (Logical Access)">
+    - Confirm `disabled: false` in `audit_logs` config.
+    - Verify all admin and developer accounts are provisioned through your IdP (Okta, Entra, etc.) so the `initiator` field in each entry maps to a known identity.
+    - Export 90 days of audit logs in JSON or JSON Lines format for auditor review.
+    - Demonstrate signature verification on a sample of entries to show tamper evidence.
+  </Accordion>
+  <Accordion title="HIPAA — §164.312(b) Audit Controls">
+    - Set `retention_days` to at least 365 (HIPAA requires a minimum of 6 years for certain records—consult your compliance team).
+    - Configure `hmac_key` using a key stored in your secrets manager (AWS Secrets Manager, HashiCorp Vault, etc.).
+    - Restrict `AuditLogs:Download` permission to authorized personnel only via RBAC.
+    - Include the audit log export in your regular workforce training and incident response documentation.
+  </Accordion>
+  <Accordion title="GDPR — Article 5(2) Accountability">
+    - Use date-range filtering to extract processing records for a specific data subject's activity.
+    - Configure log exports to your data lake for long-term retention aligned with your Records Retention Policy.
+    - Document the HMAC signing key as part of your Record of Processing Activities (RoPA).
+  </Accordion>
+  <Accordion title="ISO 27001 — A.12.4 Logging and Monitoring">
+    - Enable the Datadog connector or Log Exports to stream audit events into your central SIEM.
+    - Review the audit log table weekly for anomalous actions (unexpected deletes, off-hours access, etc.).
+    - Include audit log review in your Information Security Management System (ISMS) procedures.
+  </Accordion>
+</AccordionGroup>
+
+## Related features
+
+<CardGroup cols={2}>
+  <Card title="Log Exports" icon="database" href="/enterprise/overview">
+    Automate export of request logs and telemetry to S3, GCS, or BigQuery for long-term retention and analytics.
+  </Card>
+  <Card title="Datadog Connector" icon="chart-line" href="/enterprise/overview">
+    Stream audit events and request traces directly into Datadog APM and LLM Observability dashboards.
+  </Card>
+  <Card title="RBAC" icon="shield-halved" href="/enterprise/overview">
+    Control who can view, download, and manage audit logs using fine-grained role permissions.
+  </Card>
+  <Card title="Secret Management" icon="key" href="/enterprise/overview">
+    Store your HMAC key and other credentials securely using Bifrost's built-in secret management.
+  </Card>
+</CardGroup>

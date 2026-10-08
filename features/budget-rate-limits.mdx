@@ -1,0 +1,285 @@
+---
+title: "Budget and Rate Limits: Control AI Spending Per Team"
+sidebarTitle: "Budgets & Limits"
+description: "Enforce hierarchical spend caps and rate limits across teams, customers, and providers to keep AI costs predictable and prevent runaway usage."
+---
+
+Bifrost's governance system gives you fine-grained control over how much every team, customer, and provider can spend — and how fast they can do it. Budgets track cumulative cost in USD and reset on a configurable schedule. Rate limits cap how many requests or tokens flow through a given key per time window. Both operate in a hierarchy so you can set organisation-wide ceilings and per-team floors simultaneously.
+
+## How the hierarchy works
+
+Every budget and rate limit is attached to one level of the hierarchy. When a request arrives, Bifrost checks **all applicable levels** independently, from the most specific (provider config) up to the most general (customer). The request is blocked if **any** level has exceeded its limit.
+
+```
+Customer (independent budget)
+    └── Team (independent budget)
+            └── Virtual Key (budget + rate limits)
+                        └── Provider Config (budget + rate limits)
+```
+
+You can also attach a virtual key directly to a customer (skipping the team level), or use a standalone virtual key with no hierarchy above it.
+
+<Note>
+  **Costs are deducted from every applicable level simultaneously.** A request costing $0.01 is subtracted from the provider config budget, the virtual key budget, the team budget, and the customer budget — all at once.
+</Note>
+
+### Budget checking sequence
+
+For a request on a virtual key attached to a team under a customer:
+
+1. ✓ Provider Config budget (if configured)
+2. ✓ Virtual Key budget (if configured)
+3. ✓ Team budget (if configured)
+4. ✓ Customer budget (if configured)
+
+If any level is exhausted the request is rejected immediately. Providers that exceed their budget are excluded from routing; other providers within the same virtual key remain available.
+
+## Creating a virtual key with budgets and rate limits
+
+<CodeGroup>
+```bash curl (API)
+curl -X POST "http://localhost:8080/api/governance/virtual-keys" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "engineering-team-vk",
+    "description": "Engineering team — monthly budget with hourly rate limits",
+    "provider_configs": [
+      {
+        "provider": "openai",
+        "weight": 0.7,
+        "allowed_models": ["gpt-4o", "gpt-4o-mini"],
+        "budget": {
+          "max_limit": 500.00,
+          "reset_duration": "1M",
+          "calendar_aligned": true
+        },
+        "rate_limit": {
+          "token_max_limit": 1000000,
+          "token_reset_duration": "1h",
+          "request_max_limit": 1000,
+          "request_reset_duration": "1h"
+        }
+      },
+      {
+        "provider": "anthropic",
+        "weight": 0.3,
+        "allowed_models": ["claude-3-5-sonnet-20241022"],
+        "budget": {
+          "max_limit": 200.00,
+          "reset_duration": "1M"
+        },
+        "rate_limit": {
+          "token_max_limit": 500000,
+          "token_reset_duration": "1h",
+          "request_max_limit": 500,
+          "request_reset_duration": "1h"
+        }
+      }
+    ],
+    "budget": {
+      "max_limit": 1000.00,
+      "reset_duration": "1M",
+      "calendar_aligned": true
+    },
+    "is_active": true
+  }'
+```
+
+```json config.json
+{
+  "governance": {
+    "virtual_keys": [
+      {
+        "id": "vk-eng",
+        "name": "engineering-team-vk",
+        "is_active": true,
+        "rate_limit_id": "rl-vk-eng",
+        "provider_configs": [
+          {
+            "id": 1,
+            "provider": "openai",
+            "weight": 0.7,
+            "allowed_models": ["gpt-4o", "gpt-4o-mini"],
+            "rate_limit_id": "rl-pc-openai"
+          },
+          {
+            "id": 2,
+            "provider": "anthropic",
+            "weight": 0.3,
+            "allowed_models": ["claude-3-5-sonnet-20241022"],
+            "rate_limit_id": "rl-pc-anthropic"
+          }
+        ]
+      }
+    ],
+    "budgets": [
+      { "id": "b-vk-eng",   "virtual_key_id": "vk-eng", "max_limit": 1000.00, "reset_duration": "1M", "calendar_aligned": true },
+      { "id": "b-openai",   "provider_config_id": 1,     "max_limit": 500.00,  "reset_duration": "1M" },
+      { "id": "b-anthropic","provider_config_id": 2,     "max_limit": 200.00,  "reset_duration": "1M" }
+    ],
+    "rate_limits": [
+      { "id": "rl-vk-eng",      "request_max_limit": 3000,  "request_reset_duration": "1h", "token_max_limit": 5000000,  "token_reset_duration": "1h" },
+      { "id": "rl-pc-openai",   "request_max_limit": 1000,  "request_reset_duration": "1h", "token_max_limit": 1000000,  "token_reset_duration": "1h" },
+      { "id": "rl-pc-anthropic","request_max_limit": 500,   "request_reset_duration": "1h", "token_max_limit": 500000,   "token_reset_duration": "1h" }
+    ]
+  }
+}
+```
+</CodeGroup>
+
+## Reset durations
+
+Budgets and rate limits support flexible reset intervals using a compact duration format:
+
+| Format | Description | Common use |
+|--------|-------------|------------|
+| `1m` | 1 minute | Rate limits (burst protection) |
+| `5m` | 5 minutes | Rate limits |
+| `1h` | 1 hour | Rate limits (hourly quota) |
+| `1d` | 1 day | Daily budgets |
+| `1w` | 1 week | Weekly budgets |
+| `1M` | 1 month | Monthly budgets (most common) |
+| `1Y` | 1 year | Annual budgets |
+
+### Calendar-aligned budgets
+
+By default, budgets use **rolling windows** — the counter resets `reset_duration` after `last_reset`. Set `calendar_aligned: true` to snap resets to the start of each calendar period in UTC instead:
+
+| Duration | Calendar reset point |
+|----------|---------------------|
+| `1d` | Midnight UTC each day |
+| `1w` | Monday 00:00 UTC each week |
+| `1M` | First day of each month |
+| `1Y` | January 1 each year |
+
+<Note>
+  Calendar alignment requires a `d`, `w`, `M`, or `Y` suffix. Sub-day durations like `1h` or `30m` **cannot** use calendar alignment — the API rejects invalid combinations. Turning calendar alignment on for an existing budget resets current usage to zero and snaps `last_reset` to the current period start.
+</Note>
+
+## Rate limit types
+
+Bifrost supports two rate limit types that operate in parallel at both the virtual key and provider config levels:
+
+<CardGroup cols={2}>
+  <Card title="Request limits" icon="square-list">
+    Cap the number of API calls within a time window. Example: 1,000 requests per hour.
+    - Fields: `request_max_limit`, `request_reset_duration`
+  </Card>
+  <Card title="Token limits" icon="coins">
+    Cap the total tokens (input + output) within a time window. Example: 1M tokens per hour.
+    - Fields: `token_max_limit`, `token_reset_duration`
+  </Card>
+</CardGroup>
+
+Both limits are checked independently. A request is blocked if **either** the token limit or the request limit is exhausted at any applicable level.
+
+## Error responses when limits are hit
+
+When Bifrost blocks a request due to a budget or rate limit, it returns a structured error:
+
+<CodeGroup>
+```json Budget exceeded (402)
+HTTP/1.1 402 Payment Required
+
+{
+  "error": {
+    "type": "budget_exceeded",
+    "message": "Virtual key budget exceeded. Current usage: $1001.23, limit: $1000.00",
+    "code": "budget_exceeded"
+  }
+}
+```
+
+```json Rate limited (429)
+HTTP/1.1 429 Too Many Requests
+
+{
+  "error": {
+    "type": "rate_limited",
+    "message": "Request rate limit exceeded. Limit: 1000 requests per 1h",
+    "code": "rate_limited"
+  }
+}
+```
+</CodeGroup>
+
+<Tip>
+  Budget-exceeded and rate-limit errors at the **provider config** level don't necessarily fail the entire request — Bifrost excludes the affected provider from routing and falls back to the next available provider config in the virtual key. Configure multiple provider configs to get automatic budget-based failover.
+</Tip>
+
+## Field reference
+
+### Budget fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `max_limit` | float | Maximum spend in USD. Positive values only. |
+| `reset_duration` | string | Reset period, e.g. `"1h"`, `"1d"`, `"1M"`. |
+| `calendar_aligned` | boolean | Align resets to calendar boundaries in UTC. Requires `d`/`w`/`M`/`Y` durations. |
+
+### Rate limit fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `token_max_limit` | integer | Max total tokens (input + output) per window. |
+| `token_reset_duration` | string | Window duration for token counting, e.g. `"1h"`. |
+| `request_max_limit` | integer | Max API calls per window. |
+| `request_reset_duration` | string | Window duration for request counting, e.g. `"1m"`. |
+
+## Example: cost-optimised failover
+
+Use a low-cost primary provider with a tight daily budget, and a premium fallback with a higher limit. When the cheap provider's budget is exhausted for the day, traffic automatically shifts to the premium one — with no code changes in your application:
+
+```json
+{
+  "governance": {
+    "virtual_keys": [
+      {
+        "id": "vk-cost",
+        "name": "cost-optimised-vk",
+        "provider_configs": [
+          { "id": 10, "provider": "openai-gpt-4o-mini", "weight": 1.0 },
+          { "id": 11, "provider": "openai-gpt-4o",      "weight": 0.0 }
+        ]
+      }
+    ],
+    "budgets": [
+      { "id": "b-cheap",   "provider_config_id": 10, "max_limit": 10.00, "reset_duration": "1d" },
+      { "id": "b-premium", "provider_config_id": 11, "max_limit": 50.00, "reset_duration": "1d" }
+    ]
+  }
+}
+```
+
+Once the gpt-4o-mini config spends its $10 daily budget, Bifrost excludes it from routing and routes remaining requests to gpt-4o automatically.
+
+## Monitoring usage
+
+Track budget consumption and rate limit utilisation in real time:
+
+```bash
+# View current usage for a virtual key
+curl "http://localhost:8080/api/governance/virtual-keys/vk_abc123"
+
+# Check Prometheus metrics for cost tracking
+curl "http://localhost:8080/metrics" | grep bifrost_cost_total
+```
+
+The Prometheus `bifrost_cost_total` counter accumulates cost per `provider`, `model`, `virtual_key_id`, `team_id`, and `customer_id` labels, so you can build per-team cost dashboards in Grafana.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Automatic Fallbacks" icon="rotate" href="/features/automatic-fallbacks">
+    Combine provider-level budgets with fallback chains for cost-driven failover.
+  </Card>
+  <Card title="Observability" icon="chart-line" href="/features/observability">
+    Monitor cost and rate limit metrics with Prometheus and the web UI.
+  </Card>
+  <Card title="Semantic Caching" icon="database" href="/features/semantic-caching">
+    Reduce token spend by caching repeated or similar requests.
+  </Card>
+  <Card title="Plugins" icon="puzzle-piece" href="/features/plugins">
+    Extend governance behaviour with custom pre- and post-request hooks.
+  </Card>
+</CardGroup>

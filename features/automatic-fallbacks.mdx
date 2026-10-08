@@ -1,0 +1,198 @@
+---
+title: "Automatic Fallbacks: Keep AI Apps Running on Failure"
+sidebarTitle: "Fallbacks"
+description: "Automatically reroute AI requests to backup providers when your primary fails, keeping your application running through outages, rate limits, and errors."
+---
+
+When a provider goes down, hits its rate limit, or returns an unrecoverable error, Bifrost automatically reroutes your request to the next provider in your fallback chain — no code changes required. Your application sees a successful response while Bifrost silently handles the failover behind the scenes.
+
+## How fallbacks work
+
+Bifrost's fallback system builds on top of its retry engine. When a primary provider exhausts all its configured retries and still can't serve the request, Bifrost moves to the next entry in the fallback chain. Each fallback provider gets its own full retry budget, so a transient hiccup on a fallback doesn't immediately cascade further.
+
+<Steps>
+  <Step title="Primary attempt">
+    Bifrost sends the request to your configured primary provider. If `max_retries` is set, transient errors are retried first.
+  </Step>
+  <Step title="Fallback evaluation">
+    If the primary fails after exhausting its retries, Bifrost inspects the fallback chain (from your virtual key's `provider_configs` or the request body's `fallbacks` array).
+  </Step>
+  <Step title="Sequential failover">
+    Each fallback is tried in order. The first provider to return a successful response wins.
+  </Step>
+  <Step title="Response returned">
+    The caller receives a normal response. The `extra_fields.provider` field in the JSON body tells you which provider actually served it.
+  </Step>
+</Steps>
+
+<Note>
+  If **all** fallbacks are exhausted, Bifrost returns the original error from the primary provider — not the last fallback error.
+</Note>
+
+## Automatic fallbacks via virtual keys
+
+When you create a virtual key with multiple `provider_configs`, Bifrost automatically builds a fallback chain from them. Providers are sorted by weight descending, so higher-weight entries are tried first. You don't need to configure anything extra — the fallback chain is implicit.
+
+```json config.json (governance section)
+{
+  "governance": {
+    "virtual_keys": [
+      {
+        "id": "vk-prod",
+        "name": "production-vk",
+        "provider_configs": [
+          { "id": 1, "provider": "openai",    "weight": 0.7 },
+          { "id": 2, "provider": "anthropic", "weight": 0.3 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+In this setup, if OpenAI fails, Bifrost automatically falls over to Anthropic. No `fallbacks` array needed in the request.
+
+<Tip>
+  Omit the `provider` field from the request body when using virtual keys. This lets Bifrost's routing engine choose the primary and manage the fallback chain automatically.
+</Tip>
+
+## Manual fallbacks in the request body
+
+You can also specify a fallback chain explicitly in any request body using the `fallbacks` array. Manual fallbacks **override** the virtual key's automatic chain for that request.
+
+Each entry is a `"provider/model"` string:
+
+<CodeGroup>
+```bash curl
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [
+      { "role": "user", "content": "Explain quantum computing in simple terms" }
+    ],
+    "fallbacks": [
+      "anthropic/claude-3-5-haiku-20241022",
+      "bedrock/anthropic.claude-3-sonnet-20240229-v1:0"
+    ],
+    "max_tokens": 1000,
+    "temperature": 0.7
+  }'
+```
+
+```python Python (OpenAI SDK)
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="any",  # Bifrost manages provider keys
+)
+
+response = client.chat.completions.create(
+    model="openai/gpt-4o-mini",
+    messages=[{"role": "user", "content": "Explain quantum computing in simple terms"}],
+    extra_body={
+        "fallbacks": [
+            "anthropic/claude-3-5-haiku-20241022",
+            "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
+        ]
+    },
+)
+print(response.choices[0].message.content)
+```
+</CodeGroup>
+
+The response includes `extra_fields.provider` so you always know which provider served the request:
+
+```json Response
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Quantum computing harnesses quantum mechanics to process information..."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 14,
+    "completion_tokens": 148,
+    "total_tokens": 162
+  },
+  "extra_fields": {
+    "provider": "anthropic",
+    "latency": 1.32
+  }
+}
+```
+
+## Nested fallbacks and retry budgets
+
+Each provider in the chain — primary and every fallback — carries its own retry budget from `network_config.max_retries`. This means fallback chains are fully resilient at every layer.
+
+```
+Primary (openai, max_retries: 3)
+  → Retry 1 ... Retry 3 → all fail
+Fallback 1 (anthropic, max_retries: 2)
+  → Retry 1 ... Retry 2 → fails
+Fallback 2 (bedrock, max_retries: 1)
+  → Succeeds ✓
+```
+
+With `max_retries: 3` on the primary and `max_retries: 2` on two fallbacks, Bifrost can make up to **9 total attempts** before giving up.
+
+<Warning>
+  A plugin can halt the fallback chain entirely by setting `AllowFallbacks = false` on its error response (for example, a security or compliance plugin). When this happens, Bifrost returns that error immediately and does not try remaining fallbacks.
+</Warning>
+
+## Auditing fallback decisions
+
+Every fallback transition is recorded in the request's routing log trail. You can see exactly which provider served each request in the web UI's **Logs** panel, or query `/api/logs` to retrieve the `routing_engines_used` and `provider` fields programmatically.
+
+<CodeGroup>
+```bash Fetch recent logs
+curl "http://localhost:8080/api/logs?limit=20"
+```
+
+```bash Filter by fallback provider
+curl "http://localhost:8080/api/logs?provider=anthropic&limit=50"
+```
+</CodeGroup>
+
+## Real-world scenarios
+
+<AccordionGroup>
+  <Accordion title="Provider outage (5xx)">
+    OpenAI returns `503 Service Unavailable`. Bifrost retries with exponential backoff, exhausts `max_retries`, then silently fails over to Anthropic. Your users see no interruption.
+  </Accordion>
+  <Accordion title="Rate limit exhausted">
+    All OpenAI API keys in your pool hit their `429` rate limits. Bifrost rotates through keys, then falls back to your secondary provider when the pool is exhausted.
+  </Accordion>
+  <Accordion title="Budget-triggered fallover">
+    A virtual key's OpenAI provider config hits its monthly budget cap. Bifrost excludes that provider from routing and routes new requests to the next available provider config automatically.
+  </Accordion>
+  <Accordion title="Cost-optimised primary/backup">
+    Configure a cheap model (`weight: 1.0`) as primary with a small daily budget, and a premium model (`weight: 0.0`) as a zero-weight fallback. Once the cheap model's budget is exhausted, traffic silently shifts to the premium model.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Budget & Rate Limits" icon="shield-halved" href="/features/budget-rate-limits">
+    Use per-provider budgets to drive automatic fallbacks when cost limits are reached.
+  </Card>
+  <Card title="Observability" icon="chart-line" href="/features/observability">
+    Track which provider served each request and monitor fallback frequency.
+  </Card>
+  <Card title="Semantic Caching" icon="database" href="/features/semantic-caching">
+    Cache provider responses to reduce redundant calls and improve hit rates across fallback providers.
+  </Card>
+  <Card title="Plugins" icon="puzzle-piece" href="/features/plugins">
+    Use plugins to control fallback chain behaviour, including halting fallbacks on specific error types.
+  </Card>
+</CardGroup>

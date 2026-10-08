@@ -1,0 +1,145 @@
+{
+  "projectType": "saas",
+  "projectName": "Bifrost",
+  "projectDescription": "Bifrost is a high-performance AI gateway that unifies 20+ providers through a single OpenAI-compatible API with automatic failover, load balancing, semantic caching, and enterprise-grade governance.",
+  "theme": "luma",
+  "primaryColor": "#7c7c7c",
+  "lightColor": "#050505",
+  "darkColor": "#c2c2c2",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "gateway/setup",
+              "gateway/go-sdk"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/virtual-keys",
+              "concepts/providers",
+              "concepts/routing",
+              "concepts/load-balancing"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/automatic-fallbacks",
+              "features/semantic-caching",
+              "features/observability",
+              "features/budget-rate-limits",
+              "features/plugins"
+            ]
+          },
+          {
+            "group": "MCP Gateway",
+            "pages": [
+              "mcp/overview",
+              "mcp/connecting-to-servers",
+              "mcp/tool-execution",
+              "mcp/agent-mode",
+              "mcp/authentication"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/drop-in-replacement",
+              "integrations/openai-sdk",
+              "integrations/anthropic-sdk",
+              "integrations/langchain",
+              "integrations/litellm"
+            ]
+          },
+          {
+            "group": "Enterprise",
+            "pages": [
+              "enterprise/overview",
+              "enterprise/guardrails",
+              "enterprise/clustering",
+              "enterprise/audit-logs"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api-reference/overview",
+              "api-reference/authentication"
+            ]
+          },
+          {
+            "group": "Inference",
+            "pages": [
+              "api-reference/chat-completions",
+              "api-reference/embeddings",
+              "api-reference/images",
+              "api-reference/audio"
+            ]
+          },
+          {
+            "group": "Governance",
+            "pages": [
+              "api-reference/virtual-keys",
+              "api-reference/teams-customers",
+              "api-reference/routing-rules"
+            ]
+          },
+          {
+            "group": "MCP",
+            "pages": [
+              "api-reference/mcp-clients",
+              "api-reference/mcp-tools"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Single OpenAI-compatible API for 20+ AI providers",
+    "Automatic failover and fallback chains",
+    "Weighted load balancing across API keys and providers",
+    "Virtual Keys for access control, budgets, and rate limits",
+    "Semantic caching to reduce costs and latency",
+    "MCP Gateway: connect AI models to external tools",
+    "Built-in observability with Prometheus and OpenTelemetry",
+    "Enterprise guardrails, audit logs, and RBAC",
+    "Drop-in replacement for OpenAI, Anthropic, Google GenAI SDKs",
+    "Custom Go/WASM plugins for extensible middleware",
+    "Bifrost Edge for endpoint-level AI governance"
+  ],
+  "publicApiSurface": [
+    "POST /v1/chat/completions",
+    "POST /v1/embeddings",
+    "POST /v1/images/generations",
+    "POST /v1/audio/speech",
+    "POST /v1/audio/transcriptions",
+    "GET /v1/models",
+    "POST /v1/mcp/tool/execute",
+    "GET /api/governance/virtual-keys",
+    "POST /api/governance/virtual-keys",
+    "PUT /api/governance/virtual-keys/{id}",
+    "DELETE /api/governance/virtual-keys/{id}",
+    "POST /api/governance/teams",
+    "POST /api/governance/customers",
+    "GET /api/providers",
+    "POST /api/providers",
+    "GET /api/config",
+    "PUT /api/config",
+    "GET /api/logs",
+    "GET /metrics"
+  ]
+}

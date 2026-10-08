@@ -1,0 +1,402 @@
+---
+title: "Extend Bifrost with Custom Go and WASM Plugins Today"
+sidebarTitle: "Plugins"
+description: "Hook into every request and response with Bifrost's plugin system — write custom Go or WASM logic for caching, validation, mocking, and transformation."
+---
+
+Bifrost's plugin system lets you intercept requests and responses at multiple points in the gateway pipeline without touching provider configuration or application code. Plugins are compiled Go shared objects (`.so` files) that load at runtime, run in-process, and share Bifrost's full type system with zero IPC overhead.
+
+## What plugins can do
+
+Plugins give you middleware hooks around every LLM call:
+
+- **Transform requests and responses** — modify, enrich, or redact data before it reaches a provider or after it returns
+- **Add custom validation** — enforce business rules, content policies, or schema checks
+- **Implement custom caching** — serve responses from any external store based on custom logic
+- **Integrate with external systems** — forward logs, traces, or analytics to any platform
+- **Mock provider responses** — return deterministic test responses without hitting real APIs
+
+## Plugin lifecycle and hooks
+
+When a request flows through Bifrost, plugins are invoked at specific points in this order:
+
+<Steps>
+  <Step title="HTTPTransportPreHook">
+    Runs before the request enters Bifrost core. Intercept raw HTTP headers and body. HTTP transport only.
+  </Step>
+  <Step title="PreRequestHook (v1.6.x+)">
+    Runs **once per request** before any provider attempt. Use this hook to make routing decisions — choose provider, model, or override the fallback chain. Decisions propagate to every retry and fallback.
+  </Step>
+  <Step title="PreLLMHook">
+    Runs per provider attempt, in registration order. Can short-circuit the request and return a response directly (without calling the provider).
+  </Step>
+  <Step title="Provider call">
+    Bifrost forwards the request to the selected provider (skipped if a PreLLMHook short-circuited).
+  </Step>
+  <Step title="PostLLMHook">
+    Runs per provider attempt, in **reverse** registration order. Receives the full response for enrichment or logging.
+  </Step>
+  <Step title="HTTPTransportPostHook">
+    Runs after Bifrost returns the response. HTTP transport only, reverse order.
+  </Step>
+</Steps>
+
+<Note>
+  Dynamic plugins require a dynamically-linked Bifrost binary, which is not enabled by default. See [Building Dynamically Linked Bifrost Binary](https://docs.getbifrost.ai/plugins/building-dynamic-binary) to enable it.
+</Note>
+
+## Managing plugins via the REST API
+
+Bifrost exposes a full CRUD API for plugin management. All changes take effect immediately without a restart.
+
+### Create a plugin
+
+```bash
+curl -X POST http://localhost:8080/api/plugins \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-custom-plugin",
+    "enabled": true,
+    "path": "/path/to/myplugin.so",
+    "config": {
+      "some_option": "value"
+    }
+  }'
+```
+
+### List all plugins
+
+```bash
+curl http://localhost:8080/api/plugins
+```
+
+```json Response
+[
+  {
+    "name": "semantic_cache",
+    "enabled": true,
+    "path": "",
+    "config": {
+      "provider": "openai",
+      "embedding_model": "text-embedding-3-small",
+      "dimension": 1536,
+      "ttl": "5m",
+      "threshold": 0.8
+    }
+  },
+  {
+    "name": "my-custom-plugin",
+    "enabled": true,
+    "path": "/path/to/myplugin.so",
+    "config": { "some_option": "value" }
+  }
+]
+```
+
+### Get a specific plugin
+
+```bash
+curl http://localhost:8080/api/plugins/semantic_cache
+```
+
+### Update a plugin
+
+```bash
+curl -X PUT http://localhost:8080/api/plugins/my-custom-plugin \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enabled": false,
+    "path": "/path/to/myplugin.so",
+    "config": { "some_option": "updated-value" }
+  }'
+```
+
+### Delete a plugin
+
+```bash
+curl -X DELETE http://localhost:8080/api/plugins/my-custom-plugin
+```
+
+## Built-in plugin: Mocker
+
+The **Mocker plugin** is a first-party plugin that intercepts LLM requests and returns configurable mock responses — no real provider calls made. It's invaluable for CI pipelines, integration tests, and load testing scenarios where you need deterministic, cost-free responses.
+
+### How the Mocker plugin works
+
+The mocker evaluates a list of **rules** in priority order. Each rule specifies:
+- **Conditions** — which providers, models, or message content to match
+- **Probability** — how often to activate (0.0 = never, 1.0 = always)
+- **Responses** — one or more possible responses (with optional weights for random selection)
+- **Latency** — optional simulated delay to mimic real provider behaviour
+
+When no rules match, the `DefaultBehavior` setting controls what happens: `"passthrough"` (real provider call), `"success"` (default mock), or `"error"`.
+
+### Enabling the Mocker plugin
+
+Create the mocker plugin via the API with your rule configuration:
+
+```bash
+curl -X POST http://localhost:8080/api/plugins \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "mocker",
+    "enabled": true,
+    "path": "",
+    "config": {
+      "enabled": true,
+      "default_behavior": "passthrough",
+      "rules": [
+        {
+          "name": "openai-catch-all",
+          "enabled": true,
+          "priority": 10,
+          "probability": 1.0,
+          "conditions": {
+            "providers": ["openai"]
+          },
+          "responses": [
+            {
+              "type": "success",
+              "weight": 1.0,
+              "content": {
+                "message": "This is a mock response from OpenAI.",
+                "usage": {
+                  "prompt_tokens": 15,
+                  "completion_tokens": 12,
+                  "total_tokens": 27
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }'
+```
+
+### Advanced Mocker configuration
+
+<AccordionGroup>
+  <Accordion title="Weighted responses (simulate errors)">
+    Return a mix of successes and errors to test your application's error handling:
+
+    ```bash
+    curl -X PUT http://localhost:8080/api/plugins/mocker \
+      -H "Content-Type: application/json" \
+      -d '{
+        "enabled": true,
+        "path": "",
+        "config": {
+          "enabled": true,
+          "default_behavior": "passthrough",
+          "rules": [
+            {
+              "name": "flaky-provider-simulation",
+              "enabled": true,
+              "priority": 5,
+              "probability": 1.0,
+              "conditions": {
+                "providers": ["openai"],
+                "models": ["gpt-4o"]
+              },
+              "responses": [
+                {
+                  "type": "success",
+                  "weight": 0.8,
+                  "content": {
+                    "message": "Success! Here is your answer."
+                  }
+                },
+                {
+                  "type": "error",
+                  "weight": 0.2,
+                  "error": {
+                    "message": "Rate limit exceeded",
+                    "type": "rate_limit",
+                    "code": "429",
+                    "status_code": 429
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }'
+    ```
+  </Accordion>
+
+  <Accordion title="Dynamic responses with template variables">
+    Use `{{provider}}`, `{{model}}`, and `{{faker.*}}` placeholders to generate dynamic content:
+
+    ```json Template response config
+    {
+      "name": "dynamic-mock",
+      "enabled": true,
+      "probability": 1.0,
+      "conditions": {},
+      "responses": [
+        {
+          "type": "success",
+          "content": {
+            "message_template": "Hello from {{provider}} using {{model}}! Your case ID is {{faker.uuid}}. Agent {{faker.name}} will help you."
+          }
+        }
+      ]
+    }
+    ```
+
+    **Available template variables:**
+
+    | Variable | Description |
+    |----------|-------------|
+    | `{{provider}}` | Provider name (e.g. `openai`) |
+    | `{{model}}` | Model name (e.g. `gpt-4o-mini`) |
+    | `{{faker.name}}` | Random full name |
+    | `{{faker.email}}` | Random email address |
+    | `{{faker.uuid}}` | UUID v4 |
+    | `{{faker.company}}` | Company name |
+    | `{{faker.date}}` | Date in `YYYY-MM-DD` |
+    | `{{faker.integer}}` | Random integer 1–100 |
+    | `{{faker.boolean}}` | Random boolean |
+    | `{{faker.lorem_ipsum:10}}` | 10 words of lorem ipsum |
+  </Accordion>
+
+  <Accordion title="Latency simulation">
+    Add realistic delays to test timeout handling and streaming behaviour:
+
+    ```json Fixed latency (250ms)
+    {
+      "name": "slow-provider",
+      "enabled": true,
+      "probability": 1.0,
+      "conditions": {},
+      "responses": [
+        {
+          "type": "success",
+          "content": { "message": "Slow response." }
+        }
+      ],
+      "latency": {
+        "type": "fixed",
+        "min_ms": 250
+      }
+    }
+    ```
+
+    ```json Variable latency (100–500ms uniform)
+    {
+      "name": "variable-latency",
+      "enabled": true,
+      "probability": 1.0,
+      "conditions": {},
+      "responses": [
+        {
+          "type": "success",
+          "content": { "message": "Variable latency response." }
+        }
+      ],
+      "latency": {
+        "type": "uniform",
+        "min_ms": 100,
+        "max_ms": 500
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Regex-based message matching">
+    Activate a rule only when the user's message matches a pattern:
+
+    ```json
+    {
+      "name": "support-queries",
+      "enabled": true,
+      "priority": 20,
+      "probability": 1.0,
+      "conditions": {
+        "message_regex": "(?i).*(support|help|error|issue).*"
+      },
+      "responses": [
+        {
+          "type": "success",
+          "content": {
+            "message": "Thanks for reaching out to support. A team member will be with you shortly."
+          }
+        }
+      ]
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Mocker rule reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | — | Unique rule name |
+| `enabled` | bool | `true` | Enable or disable this rule |
+| `priority` | int | `0` | Higher numbers evaluated first |
+| `probability` | float | `1.0` | Activation probability: `0.0` = never, `1.0` = always |
+| `conditions.providers` | string[] | — | Match specific providers, e.g. `["openai"]` |
+| `conditions.models` | string[] | — | Match specific models |
+| `conditions.message_regex` | string | — | Regex pattern matched against message content |
+| `responses[].type` | string | — | `"success"` or `"error"` |
+| `responses[].weight` | float | `1.0` | Relative weight for random selection |
+| `responses[].content.message` | string | — | Static response text |
+| `responses[].content.message_template` | string | — | Template with `{{provider}}`, `{{faker.*}}` etc. |
+| `responses[].allow_fallbacks` | bool\|null | `null` | `false` to block fallback chain on this error |
+| `latency.type` | string | — | `"fixed"` or `"uniform"` |
+| `latency.min_ms` | int | — | Fixed delay or minimum uniform delay in ms |
+| `latency.max_ms` | int | — | Maximum uniform delay in ms |
+
+## Building your own plugin
+
+If you need behaviour beyond what built-in plugins provide, you can write a Go plugin compiled as a shared object:
+
+```bash
+# Build your plugin as a shared object
+go build -buildmode=plugin -o myplugin.so ./plugins/myplugin/
+
+# Load it at runtime via the API
+curl -X POST http://localhost:8080/api/plugins \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "myplugin",
+    "enabled": true,
+    "path": "/path/to/myplugin.so",
+    "config": {}
+  }'
+```
+
+Your plugin must export these functions matching Bifrost's interface:
+
+```go myplugin/main.go
+package main
+
+func Init(config any) error         { /* initialize */ return nil }
+func GetName() string               { return "myplugin" }
+func PreLLMHook() /* ... */         { /* modify request */ }
+func PostLLMHook() /* ... */        { /* inspect response */ }
+func Cleanup() error                { return nil }
+```
+
+<Warning>
+  Go plugins are **Linux and macOS only** — no Windows support. The plugin and Bifrost binary must be built with the same Go version and target architecture. Cross-compilation is not supported.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Semantic Caching" icon="database" href="/features/semantic-caching">
+    The semantic cache is itself a plugin — a good reference implementation.
+  </Card>
+  <Card title="Observability" icon="chart-line" href="/features/observability">
+    Use PostLLMHook to forward custom telemetry data to any backend.
+  </Card>
+  <Card title="Automatic Fallbacks" icon="arrows-rotate" href="/features/automatic-fallbacks">
+    Learn how plugins can control fallback chain behaviour per error type.
+  </Card>
+  <Card title="Budget & Rate Limits" icon="shield-halved" href="/features/budget-rate-limits">
+    Combine governance limits with plugin hooks for fine-grained access control.
+  </Card>
+</CardGroup>

@@ -1,0 +1,108 @@
+---
+title: "MCP Gateway: Connect AI Models to External Tools Now"
+sidebarTitle: "Overview"
+description: "Enable AI models to discover and execute external tools via MCP. Transform static chat models into action-capable agents with full security control."
+---
+
+The Model Context Protocol (MCP) is an open standard that lets AI models discover and invoke external tools at runtime. Instead of being limited to text generation, your models can interact with filesystems, search the web, query databases, and run custom business logic — all through MCP-compatible servers you connect to Bifrost.
+
+Bifrost's MCP Gateway goes well beyond simple tool proxying. It acts simultaneously as an **MCP client** (connecting outward to external tool servers) and an **MCP server** (exposing those tools to clients like Claude Desktop). You get granular execution control, per-user authentication, autonomous agent loops, and Code Mode — a Python orchestration layer that cuts token costs by up to 92.8% when you have many tools in play.
+
+## What is MCP?
+
+MCP defines a standard way for AI models to call external tools. Any MCP-compatible server can expose a set of named tools with typed parameters and return values. Bifrost connects to those servers, discovers their tools, and makes them available to any LLM you route through the gateway.
+
+Bifrost's MCP integration provides four core capabilities:
+
+- **MCP Client** — Connect to any MCP-compatible server (filesystem, web search, databases, and more) via STDIO, HTTP, or SSE
+- **MCP Server** — Expose your connected tools to external MCP clients such as Claude Desktop or Cursor
+- **Agent Mode** — Autonomous tool execution with configurable per-tool auto-approval
+- **Code Mode** — Let AI write and execute Python to orchestrate multiple tools in a sandboxed Starlark interpreter
+
+## Security-First Design
+
+By default, Bifrost does **not** automatically execute tool calls returned by an LLM. Tool calls are treated as suggestions — execution requires a separate, explicit API call from your application. This keeps a human in the loop for any operation that could have side effects.
+
+<Note>
+  You can enable [Agent Mode](/mcp/agent-mode) to allow automatic execution of specific, pre-approved tools via the `tools_to_auto_execute` configuration. Auto-execution is always opt-in and granular — you control exactly which tools can run without approval.
+</Note>
+
+| Principle | Description |
+|-----------|-------------|
+| **Explicit Execution** | Tool calls from LLMs are suggestions only — execution requires a separate API call |
+| **Granular Control** | Filter which tools are available per-request, per-client, or per-virtual-key |
+| **Opt-in Auto-execution** | Agent Mode with auto-execution must be explicitly configured per tool |
+| **Stateless Design** | Each API call is independent — your application owns conversation state |
+
+## Key Capabilities
+
+<Card title="Connect to MCP Servers" icon="plug" href="/mcp/connecting-to-servers">
+  Connect to external MCP servers via STDIO, HTTP, or SSE with automatic exponential backoff retry logic.
+</Card>
+
+<Card title="Authentication" icon="lock" href="/mcp/authentication">
+  Choose the right auth type for each server — None, Headers, OAuth 2.0, Per-User OAuth, or Per-User Headers.
+</Card>
+
+<Card title="Tool Execution" icon="play" href="/mcp/tool-execution">
+  Execute tools with full control over approval flow, conversation state, and error handling.
+</Card>
+
+<Card title="Agent Mode" icon="robot" href="/mcp/agent-mode">
+  Enable autonomous tool execution with configurable auto-approval and a configurable recursion depth limit.
+</Card>
+
+## How MCP Works in Bifrost
+
+Bifrost sits between your application (or LLM) and the external MCP servers you configure. It manages connections, discovers available tools, injects tool definitions into LLM requests, and handles tool call execution — all through a stateless API your application drives.
+
+## Basic Tool Calling Flow
+
+The default tool calling pattern is **stateless and explicit**. Your application controls every step:
+
+<Steps>
+  <Step title="Send a chat completion request">
+    POST to `/v1/chat/completions`. Bifrost automatically injects tool definitions for all connected MCP servers into the LLM request. The LLM returns tool call suggestions in the response — but nothing is executed yet.
+  </Step>
+  <Step title="Review the tool calls">
+    Your application inspects the `tool_calls` array in the LLM response. Apply your own security rules, validate arguments, or surface a user approval prompt. You decide what gets executed.
+  </Step>
+  <Step title="Execute approved tool calls">
+    For each approved tool call, POST to `/v1/mcp/tool/execute`. Bifrost routes the call to the correct MCP server and returns the result in a format ready to append to your conversation history.
+  </Step>
+  <Step title="Continue the conversation">
+    Assemble the full conversation history — original messages, the assistant's tool-call message, and each tool result — and POST again to `/v1/chat/completions`. The LLM sees the results and produces a final response.
+  </Step>
+</Steps>
+
+This pattern guarantees no unintended API calls to external services, no accidental data modification, and a full audit trail of every tool operation.
+
+## Why Code Mode Matters
+
+If you are planning to connect **three or more MCP servers**, read the Code Mode documentation before going to production. When you expose many tools directly to the LLM, every single request includes all tool definitions in the context window — and that catalog grows linearly with each server you add.
+
+Code Mode solves this by exposing only **four generic meta-tools** to the LLM. The model uses those tools to write Python code that orchestrates everything else in an isolated Starlark sandbox. Intermediate results never return to the model — only the final, compact output does.
+
+In benchmarks across 508 tools and 16 servers, Code Mode reduced input token usage by **92.8%** and estimated cost by **92.2%** compared to classic MCP, while maintaining a 100% task pass rate.
+
+<Tip>
+  You can mix Code Mode and classic MCP clients in the same deployment — use Code Mode for heavy servers (web search, databases, documents) and keep small utilities as direct tools.
+</Tip>
+
+## Next Steps
+
+<Card title="Connect to MCP Servers" icon="server" href="/mcp/connecting-to-servers">
+  Set up your first MCP client connection via STDIO, HTTP, or SSE.
+</Card>
+
+<Card title="Authentication" icon="key" href="/mcp/authentication">
+  Pick the right auth type for your MCP servers.
+</Card>
+
+<Card title="Tool Execution" icon="terminal" href="/mcp/tool-execution">
+  Learn the full tool execution workflow with working curl examples.
+</Card>
+
+<Card title="Agent Mode" icon="bolt" href="/mcp/agent-mode">
+  Configure autonomous tool execution with auto-approval.
+</Card>

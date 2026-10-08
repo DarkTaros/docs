@@ -1,0 +1,304 @@
+---
+title: "Semantic Caching: Reduce AI Costs with Intelligent Responses"
+sidebarTitle: "Semantic Caching"
+description: "Cache AI responses using exact-match hashing and embedding-based similarity search to eliminate redundant provider calls and slash inference costs."
+---
+
+Every time a user asks the same question — or a slightly rephrased version of one — Bifrost can serve a cached answer in milliseconds instead of making another expensive call to your AI provider. Semantic caching stores responses against a vector representation of each request and replays them whenever a new request is close enough to a previous one, even if the wording differs.
+
+## How semantic caching works
+
+Bifrost offers two complementary lookup paths that you can run independently or together:
+
+<CardGroup cols={2}>
+  <Card title="Direct (hash) matching" icon="hashtag">
+    The request is normalised and hashed deterministically. Identical requests are served instantly — no embeddings needed, sub-millisecond latency.
+  </Card>
+  <Card title="Semantic (similarity) matching" icon="brain">
+    An embedding is generated for the incoming request and compared against stored vectors. If cosine similarity exceeds the configured threshold, the cached response is returned.
+  </Card>
+</CardGroup>
+
+When both modes are active, Bifrost runs **direct first**. A semantic search only runs on a direct miss. Writes are **asynchronous** — the first request never blocks on a cache write.
+
+<Note>
+  **What gets cached:** chat completions, text completions, the Responses API (including WebSocket), embeddings, transcriptions, speech, and image generation — including their streaming variants.
+</Note>
+
+## Prerequisites
+
+Before enabling caching you need a **vector store** backend. Both modes (including direct-only) require one.
+
+<Tabs>
+  <Tab title="Redis / Valkey">
+    Recommended for direct-only mode. Fast exact-match lookups via TAG field indexing.
+    ```json config.json
+    {
+      "vector_store": {
+        "enabled": true,
+        "type": "redis",
+        "config": {
+          "addr": "localhost:6379"
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Weaviate">
+    Production-ready vector database with gRPC support. Suitable for semantic mode.
+  </Tab>
+  <Tab title="Qdrant">
+    Rust-based vector search engine with advanced filtering. Semantic mode only.
+  </Tab>
+  <Tab title="Pinecone">
+    Managed, serverless vector database. Semantic mode only.
+  </Tab>
+</Tabs>
+
+<Warning>
+  Qdrant, Pinecone, and Weaviate require a vector for every entry and **cannot** be used for direct-only mode. Use Redis/Valkey for direct-only caching.
+</Warning>
+
+## Enabling semantic caching
+
+<Tabs>
+  <Tab title="API (POST /api/plugins)">
+    Create the `semantic_cache` plugin via the REST API. Changes apply immediately without a restart.
+
+    **Semantic mode (with embeddings):**
+    ```bash
+    curl -X POST http://localhost:8080/api/plugins \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "semantic_cache",
+        "enabled": true,
+        "path": "",
+        "config": {
+          "provider": "openai",
+          "embedding_model": "text-embedding-3-small",
+          "dimension": 1536,
+          "ttl": "5m",
+          "threshold": 0.8,
+          "conversation_history_threshold": 3,
+          "exclude_system_prompt": false,
+          "cache_by_model": true,
+          "cache_by_provider": true,
+          "vector_store_namespace": "BifrostSemanticCachePlugin",
+          "default_cache_key": ""
+        }
+      }'
+    ```
+
+    **Direct-only mode (no embeddings):**
+    ```bash
+    curl -X POST http://localhost:8080/api/plugins \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "semantic_cache",
+        "enabled": true,
+        "path": "",
+        "config": {
+          "dimension": 1,
+          "ttl": "5m",
+          "cache_by_model": true,
+          "cache_by_provider": true
+        }
+      }'
+    ```
+  </Tab>
+  <Tab title="config.json">
+    ```json
+    {
+      "vector_store": {
+        "enabled": true,
+        "type": "redis",
+        "config": { "addr": "localhost:6379" }
+      },
+      "plugins": [
+        {
+          "enabled": true,
+          "name": "semantic_cache",
+          "config": {
+            "provider": "openai",
+            "embedding_model": "text-embedding-3-small",
+            "dimension": 1536,
+            "ttl": "5m",
+            "threshold": 0.8,
+            "conversation_history_threshold": 3,
+            "exclude_system_prompt": false,
+            "cache_by_model": true,
+            "cache_by_provider": true,
+            "vector_store_namespace": "BifrostSemanticCachePlugin",
+            "default_cache_key": ""
+          }
+        }
+      ]
+    }
+    ```
+  </Tab>
+  <Tab title="Web UI">
+    1. Configure a **vector store** in `config.json` first — the UI toggle stays disabled until one is active.
+    2. Go to **Settings → Caching → Local Cache**.
+    3. Flip **Enable Caching** on.
+    4. Choose **Direct only** or **Direct + Semantic** using the mode tabs.
+    5. For semantic mode, set the **Embedding Provider**, **Embedding Model**, and **Dimension**.
+    6. Click **Save Changes**.
+  </Tab>
+</Tabs>
+
+## Triggering the cache per request
+
+**A cache key is required.** Caching only activates when a request carries a cache key — either via the `x-bf-cache-key` header or a configured `default_cache_key`. Without one, the request bypasses caching entirely.
+
+The cache key acts as an isolation boundary: requests under `tenant-A` can never be served a response cached under `tenant-B`, even if the prompts are identical.
+
+```bash
+# This request WILL be cached
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-cache-key: session-abc-123" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{ "role": "user", "content": "What is the capital of France?" }]
+  }'
+
+# This request will NOT be cached (no header, no default_cache_key)
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{ "role": "user", "content": "What is the capital of France?" }]
+  }'
+```
+
+## Per-request overrides
+
+You can fine-tune caching behaviour on a per-request basis using headers:
+
+| Header | Value | Effect |
+|--------|-------|--------|
+| `x-bf-cache-key` | string | Partition key — required for caching to engage |
+| `x-bf-cache-ttl` | duration string or seconds | Override TTL for this request (e.g. `30s`, `300`) |
+| `x-bf-cache-threshold` | float `0`–`1` | Override semantic similarity threshold |
+| `x-bf-cache-type` | `direct` or `semantic` | Restrict lookup to a single path |
+| `x-bf-cache-no-store` | `true` | Read from cache but don't store the response |
+
+```bash
+# Custom TTL and higher threshold for a strict match
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-cache-key: support-session-42" \
+  -H "x-bf-cache-ttl: 30s" \
+  -H "x-bf-cache-threshold: 0.92" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{ "role": "user", "content": "How do I reset my password?" }]
+  }'
+```
+
+## Configuration reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | — | Embedding provider. Required for semantic mode; omit for direct-only. |
+| `embedding_model` | string | — | Embedding model name (e.g. `text-embedding-3-small`). |
+| `dimension` | integer | — | Vector size. Use `1` for direct-only; the model's real size for semantic mode. **Required.** |
+| `ttl` | duration / seconds | `5m` | How long entries live. Accepts `"5m"` or `300`. |
+| `threshold` | number `0`–`1` | `0.8` | Minimum cosine similarity for a semantic hit. |
+| `conversation_history_threshold` | integer | `3` | Skip caching when a conversation exceeds this many messages. |
+| `exclude_system_prompt` | boolean | `false` | Exclude system messages from cache-key generation. |
+| `cache_by_model` | boolean | `true` | Include model name in cache key — different models won't share entries. |
+| `cache_by_provider` | boolean | `true` | Include provider name in cache key. |
+| `vector_store_namespace` | string | `BifrostSemanticCachePlugin` | Bucket/index where entries live. |
+| `default_cache_key` | string | `""` | Fallback key for requests without `x-bf-cache-key`. |
+
+## Inspecting cache debug metadata
+
+Every cache-enabled response includes a `cache_debug` block under `extra_fields`:
+
+<CodeGroup>
+```json Direct cache hit
+{
+  "extra_fields": {
+    "cache_debug": {
+      "cache_hit": true,
+      "hit_type": "direct",
+      "cache_id": "550e8500-e29b-41d4-a725-446655440001"
+    }
+  }
+}
+```
+
+```json Semantic cache hit
+{
+  "extra_fields": {
+    "cache_debug": {
+      "cache_hit": true,
+      "hit_type": "semantic",
+      "cache_id": "550e8500-e29b-41d4-a725-446655440001",
+      "threshold": 0.8,
+      "similarity": 0.95,
+      "provider_used": "openai",
+      "model_used": "text-embedding-3-small",
+      "input_tokens": 12
+    }
+  }
+}
+```
+
+```json Cache miss
+{
+  "extra_fields": {
+    "cache_debug": {
+      "cache_hit": false,
+      "cache_id": "550e8500-e29b-41d4-a725-446655440001",
+      "provider_used": "openai",
+      "model_used": "text-embedding-3-small",
+      "input_tokens": 12
+    }
+  }
+}
+```
+</CodeGroup>
+
+## Cache invalidation
+
+Use the `cache_id` from `cache_debug` to invalidate individual entries, or use the cache key to clear an entire partition:
+
+```bash
+# Invalidate a specific entry by its cache ID
+curl -X DELETE http://localhost:8080/api/cache/clear/550e8500-e29b-41d4-a725-446655440001
+
+# Clear all entries belonging to a cache key (e.g. invalidate a session)
+curl -X DELETE http://localhost:8080/api/cache/clear-by-key/support-session-456
+```
+
+<Note>
+  Cache entries persist across Bifrost restarts — they live in your vector store and are served again after a restart until their TTL expires. To wipe all entries, use the clear APIs or drop the namespace directly in your vector store.
+</Note>
+
+## Latency considerations
+
+Caching improves **average** latency but adds a small overhead to every cache-enabled request:
+
+| Mode | Added latency | Notes |
+|------|--------------|-------|
+| **Direct hit** | Sub-millisecond to a few ms | One vector store round-trip |
+| **Direct miss** | Same as above | Round-trip cost even on a miss |
+| **Semantic hit** | Tens to hundreds of ms | Embedding call + similarity search |
+| **Semantic miss** | Embedding call + full LLM call | Slower than no cache on a cold miss |
+
+<Tip>
+  For most production workloads, start with **direct-only mode** (`dimension: 1`). It has zero embedding cost and near-instant hits for truly repeated queries. Enable semantic mode once you've validated your cache key strategy.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Plugins overview" icon="puzzle-piece" href="/features/plugins">
+    Semantic caching is implemented as a plugin — learn how the plugin pipeline works.
+  </Card>
+  <Card title="Observability" icon="chart-bar" href="/features/observability">
+    Monitor cache hit rates with the `bifrost_cache_hits_total` Prometheus metric.
+  </Card>
+</CardGroup>

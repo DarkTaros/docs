@@ -1,0 +1,319 @@
+---
+title: "High-Availability Clustering and Zero-Downtime Deploys"
+sidebarTitle: "Clustering"
+description: "Run Bifrost across multiple nodes with automatic service discovery, gossip-based state sync, and rolling deployments that never drop a request."
+---
+
+Bifrost clustering turns a single-node gateway into a fault-tolerant, horizontally scalable fleet. Nodes discover each other automatically, synchronize configuration and state continuously, and re-elect a leader whenever a node joins or leaves—all without operator intervention. You get high availability, elastic capacity, and zero-downtime deploys in exchange for opening two additional ports between your nodes.
+
+<Note>
+  Clustering is an Enterprise feature. A minimum of **three nodes** is recommended for production deployments to tolerate a single node failure.
+</Note>
+
+## Why clustering matters
+
+| Challenge | Without clustering | With clustering |
+|---|---|---|
+| Single point of failure | Complete outage if the gateway goes down | Automatic failover to healthy nodes |
+| Traffic spikes | Performance degrades under high load | Dynamic load distribution across all nodes |
+| Provider rate limits | Requests throttled per-instance | Distributed rate-limit tracking across the cluster |
+| Maintenance windows | Downtime required for updates | Zero-downtime rolling deployments |
+| Regional latency | Single deployment location | Geographic distribution with local processing |
+
+## How it works
+
+<Steps>
+  <Step title="Nodes discover each other">
+    Each node uses one of six service discovery methods—Kubernetes pod selectors, Consul, etcd, DNS, UDP broadcast, or mDNS—to find its peers. You configure discovery once in `cluster_config`; Bifrost handles the rest.
+  </Step>
+  <Step title="Cluster membership stays current">
+    Bifrost automatically tracks which nodes are alive, which are unavailable, and which have joined or left. Membership events propagate across the cluster within seconds, so every node always has a current view of the fleet.
+  </Step>
+  <Step title="Configuration and state replicate automatically">
+    Virtual keys, providers, routing rules, governance counters, RBAC policies, MCP tool groups, and all other configuration automatically replicate to every node. There is nothing to push or synchronize manually.
+  </Step>
+  <Step title="Leadership is automatic">
+    Bifrost elects a leader for cluster-wide coordination tasks (such as fetching updated pricing data) and a separate leader per region. Failover is automatic when a node goes down—no intervention required.
+  </Step>
+  <Step title="State converges across all nodes">
+    Bifrost guarantees that each configuration update is applied exactly once per node. All nodes converge to consistent state within seconds of any change.
+  </Step>
+</Steps>
+
+## Minimum node requirements
+
+| Cluster size | Fault tolerance | Recommended use |
+|---|---|---|
+| 3 nodes | 1 node failure | Small production deployments |
+| 5 nodes | 2 node failures | Medium production deployments |
+| 7+ nodes | 3+ node failures | Large enterprise deployments |
+
+## Basic configuration
+
+The `cluster_config` block in your `config.json` controls all clustering behavior. Ports `10101` and `10102` must be reachable peer-to-peer between all nodes—update your NetworkPolicies, security groups, and firewall rules accordingly.
+
+```json
+{
+  "cluster_config": {
+    "enabled": true,
+    "node_id": "bifrost-node-1",
+    "region": "us-east-1",
+    "discovery": {
+      "enabled": true,
+      "type": "kubernetes",
+      "k8s_label_selector": "app=bifrost",
+      "k8s_namespace": "production"
+    },
+    "gossip": {
+      "port": 10101,
+      "config": {
+        "timeout_seconds": 10,
+        "success_threshold": 3,
+        "failure_threshold": 3
+      }
+    },
+    "grpc": {
+      "port": 10102,
+      "dial_timeout_seconds": 5
+    }
+  }
+}
+```
+
+<Tip>
+  Set a unique `node_id` per pod or instance—UUID-style values work fine. Without it, the cluster status view is harder to read.
+</Tip>
+
+### Top-level fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `enabled` | boolean | Yes | Master switch for cluster mode |
+| `node_id` | string | Recommended | Logical name for this node, shown in topology view and diagnostics |
+| `region` | string | No | Region label (e.g. `us-east-1`); gates regional leader election. Defaults to `unknown` |
+| `peers` | array | Conditional | Static `host:port` list. Required if `discovery.enabled` is `false` |
+| `gossip` | object | No | Cluster gossip settings |
+| `grpc` | object | No | Cluster sync settings |
+| `discovery` | object | Conditional | Auto-discovery settings. Required if `peers` is empty |
+
+## Service discovery methods
+
+Bifrost supports six discovery methods. Choose based on your infrastructure:
+
+<CardGroup cols={2}>
+  <Card title="Kubernetes" icon="dharmachakra">
+    Native pod discovery via label selectors. Uses the K8s API—no external dependencies. Best for cloud-native deployments on EKS, GKE, or AKS.
+
+    ```json
+    "discovery": {
+      "type": "kubernetes",
+      "k8s_label_selector": "app=bifrost",
+      "k8s_namespace": "production"
+    }
+    ```
+  </Card>
+  <Card title="Consul" icon="building">
+    HashiCorp Consul service mesh integration with automatic health checks. Best for environments already using Consul.
+
+    ```json
+    "discovery": {
+      "type": "consul",
+      "service_name": "bifrost-cluster",
+      "consul_address": "consul.service.consul:8500"
+    }
+    ```
+  </Card>
+  <Card title="etcd" icon="database">
+    etcd distributed key-value store with TTL-based leases. Nodes register on startup and renew their lease via keepalive. Best for systems already using etcd.
+
+    ```json
+    "discovery": {
+      "type": "etcd",
+      "service_name": "bifrost-cluster",
+      "etcd_endpoints": ["http://etcd-1:2379", "http://etcd-2:2379"]
+    }
+    ```
+  </Card>
+  <Card title="DNS" icon="globe">
+    Resolves A records or headless K8s service DNS names to a list of peer IPs. Passive—Bifrost does not register itself. Best for static infrastructure or cloud DNS.
+
+    ```json
+    "discovery": {
+      "type": "dns",
+      "dns_names": ["bifrost-cluster.internal.company.com"]
+    }
+    ```
+  </Card>
+  <Card title="UDP Broadcast" icon="wifi">
+    Automatic discovery on the same subnet using broadcast packets. No external dependencies. Best for on-premise deployments on a single network segment.
+
+    ```json
+    "discovery": {
+      "type": "udp",
+      "service_name": "bifrost-cluster",
+      "udp_broadcast_port": 9999,
+      "allowed_address_space": ["10.0.0.0/8"]
+    }
+    ```
+  </Card>
+  <Card title="mDNS" icon="laptop">
+    Multicast DNS with zero configuration. Nodes advertise via Bonjour/Avahi. Best for local development and testing—not recommended for production.
+
+    ```json
+    "discovery": {
+      "type": "mdns",
+      "service_name": "bifrost",
+      "mdns_service": "_bifrost._tcp"
+    }
+    ```
+  </Card>
+</CardGroup>
+
+## Broker mode
+
+Standard clustering (mesh mode) requires every node to accept inbound gossip and gRPC connections from every peer. Some platforms—notably Google Cloud Run—do not support inbound instance-to-instance traffic. **Broker mode** solves this.
+
+In broker mode, each node makes a single outbound gRPC connection to a central broker process. The broker relays messages between nodes and pushes a roster of connected node IDs. No inbound ports are required on any node.
+
+```json
+{
+  "cluster_config": {
+    "enabled": true,
+    "type": "broker",
+    "region": "us-east-1",
+    "broker": {
+      "address": "broker.example.run.app:443",
+      "tls": true,
+      "auth_token": "env.BROKER_AUTH_TOKEN"
+    }
+  }
+}
+```
+
+The broker runs the same Bifrost Enterprise image started with `-mode=broker` (or `BIFROST_MODE=broker`). It starts only the relay gRPC server—no database, providers, or HTTP gateway.
+
+```bash
+bifrost-enterprise -mode=broker -app-dir /app/data
+```
+
+<Warning>
+  All nodes in a broker-mode cluster must connect to the **same** broker instance. Deploy the broker as a single-instance Cloud Run service (`min-instances=1`, `max-instances=1`) with HTTP/2 enabled end-to-end. Cloud Run caps streaming connections at 60 minutes; nodes reconnect automatically with exponential backoff when the stream closes.
+</Warning>
+
+## Kubernetes production deployment
+
+<Tabs>
+  <Tab title="StatefulSet">
+    ```yaml
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: bifrost
+      namespace: production
+    spec:
+      serviceName: bifrost-cluster
+      replicas: 3
+      selector:
+        matchLabels:
+          app: bifrost
+      template:
+        metadata:
+          labels:
+            app: bifrost
+        spec:
+          serviceAccountName: bifrost
+          containers:
+          - name: bifrost
+            image: your-registry/bifrost-enterprise:latest
+            ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 10101
+              name: gossip
+            - containerPort: 10102
+              name: grpc
+            volumeMounts:
+            - name: config
+              mountPath: /etc/bifrost
+          volumes:
+          - name: config
+            configMap:
+              name: bifrost-config
+    ---
+    apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: bifrost
+      namespace: production
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: bifrost-pod-reader
+      namespace: production
+    rules:
+    - apiGroups: [""]
+      resources: ["pods"]
+      verbs: ["get", "list", "watch"]
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: bifrost-pod-reader
+      namespace: production
+    subjects:
+    - kind: ServiceAccount
+      name: bifrost
+      namespace: production
+    roleRef:
+      kind: Role
+      name: bifrost-pod-reader
+      apiGroup: rbac.authorization.k8s.io
+    ```
+  </Tab>
+  <Tab title="Headless Service">
+    ```yaml
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: bifrost-cluster
+      namespace: production
+    spec:
+      clusterIP: None
+      selector:
+        app: bifrost
+      ports:
+      - port: 10101
+        name: gossip
+      - port: 10102
+        name: grpc
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  The Kubernetes discovery method requires the pod's ServiceAccount to have `get`, `list`, and `watch` permissions on the `pods` resource. Without this RBAC, nodes cannot discover each other.
+</Note>
+
+## Health check endpoints
+
+Use these endpoints in your load balancer health checks and readiness probes:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/health` | GET | Basic liveness check |
+| `/health/ready` | GET | Readiness check—returns 503 until the node has joined the cluster |
+| `/api/cluster/status` | GET | Cluster topology, node list, and leader identity |
+
+## Zero-downtime rolling deployments
+
+Because state is replicated across all nodes over gossip and gRPC, you can perform rolling updates without downtime:
+
+1. Update one node at a time in your StatefulSet or Deployment.
+2. The updated node rejoins the cluster and receives current state from its peers.
+3. The load balancer continues routing to healthy nodes throughout.
+4. Leadership transfers automatically if the current leader is updated.
+
+<Tip>
+  Mixed-version clusters are supported during a rolling update. Bifrost's replication protocol is forward-compatible across minor versions, so nodes on different versions can coexist briefly during the rollout.
+</Tip>

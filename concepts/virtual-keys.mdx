@@ -1,0 +1,363 @@
+---
+title: "Virtual Keys: Control Access and Budgets in Bifrost"
+sidebarTitle: "Virtual Keys"
+description: "Virtual keys are Bifrost's primary governance entity—scoped credentials that enforce provider access, spending budgets, and rate limits on every request."
+---
+
+Virtual keys are the main way you control who can use your AI models and how much they can spend. Every request that carries a virtual key is checked against the key's allowed providers, model whitelist, budget cap, and rate limits before Bifrost ever contacts an upstream provider. You can attach a virtual key to a team or a customer so that usage rolls up through a hierarchy, or leave it freestanding for one-off integrations.
+
+## Supported authentication headers
+
+When callers authenticate with a virtual key they can present it in any of four headers:
+
+| Header | Format | Notes |
+|---|---|---|
+| `x-bf-vk` | `sk-bf-*` | Dedicated Bifrost header, always works |
+| `Authorization` | `Bearer sk-bf-*` | OpenAI-style; only usable when HTTP auth is disabled |
+| `x-api-key` | `sk-bf-*` | Anthropic-style |
+| `x-goog-api-key` | `sk-bf-*` | Google Gemini-style |
+
+<Note>
+  Legacy virtual keys without the `sk-bf-*` prefix are only accepted by the
+  `x-bf-vk` header. When HTTP authentication is enabled on the gateway, you
+  must use `x-bf-vk` for the virtual key and `Authorization` for credentials—
+  the two are independent layers.
+</Note>
+
+## What a virtual key controls
+
+<CardGroup cols={2}>
+  <Card title="Access Control" icon="shield-check">
+    Restrict which providers and models the key can reach. Any request for an unlisted provider or model is rejected before touching upstream APIs.
+  </Card>
+  <Card title="Budget Limits" icon="circle-dollar-to-slot">
+    Set a dollar cap with a rolling or calendar-aligned reset window. Usage is checked against the key's own budget **and** any team or customer budget above it.
+  </Card>
+  <Card title="Rate Limiting" icon="gauge-high">
+    Apply per-window token and request limits at the virtual key level. Teams and customers do not have independent rate limits—only virtual keys do.
+  </Card>
+  <Card title="Key Restrictions" icon="key">
+    Pin a virtual key to a subset of your stored provider API keys so different teams can never cross-contaminate billing accounts or environments.
+  </Card>
+</CardGroup>
+
+## Creating a virtual key
+
+<Tabs>
+  <Tab title="Web UI">
+    <Steps>
+      <Step title="Open Virtual Keys">
+        In the Bifrost dashboard navigate to **Virtual Keys** and click **Add Virtual Key**.
+      </Step>
+      <Step title="Configure budget">
+        Set a **Max Limit** (e.g. `50.00`) and choose a **Reset Duration** (`1m`, `1h`, `1d`, `1w`, `1M`, or `1Y`). Enable **Calendar aligned** to reset at UTC day/week/month boundaries instead of a rolling window.
+      </Step>
+      <Step title="Configure rate limits (optional)">
+        Enter a **Token Limit** and/or **Request Limit** along with their own reset durations.
+      </Step>
+      <Step title="Attach to a team or customer (optional)">
+        Pick an existing team **or** an existing customer. A virtual key can belong to one or the other—not both.
+      </Step>
+      <Step title="Set an expiry (optional)">
+        Choose **Never**, a preset (30 min → 7 days), or a custom UTC timestamp. Expired keys are rejected with `403` but stay visible for auditing.
+      </Step>
+      <Step title="Create">
+        Click **Create Virtual Key**. Copy the returned `sk-bf-*` value—it is shown once.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="curl (API)">
+    **Create a virtual key attached to a team:**
+
+    ```bash
+    curl -X POST http://localhost:8080/api/governance/virtual-keys \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "Engineering Team API",
+        "description": "Main API key for the engineering team",
+        "provider_configs": [
+          {
+            "provider": "openai",
+            "weight": 0.6,
+            "allowed_models": ["gpt-4o", "gpt-4o-mini"],
+            "key_ids": ["*"]
+          },
+          {
+            "provider": "anthropic",
+            "weight": 0.4,
+            "allowed_models": ["claude-3-5-sonnet-20241022"],
+            "key_ids": ["*"]
+          }
+        ],
+        "team_id": "team-eng-001",
+        "budget": {
+          "max_limit": 100.00,
+          "reset_duration": "1M"
+        },
+        "rate_limit": {
+          "token_max_limit": 500000,
+          "token_reset_duration": "1h",
+          "request_max_limit": 1000,
+          "request_reset_duration": "1m"
+        },
+        "is_active": true
+      }'
+    ```
+
+    **Create a virtual key attached directly to a customer:**
+
+    ```bash
+    curl -X POST http://localhost:8080/api/governance/virtual-keys \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "Acme Corp Production Key",
+        "provider_configs": [
+          {
+            "provider": "openai",
+            "weight": 0.5,
+            "allowed_models": ["gpt-4o"],
+            "key_ids": ["*"]
+          },
+          {
+            "provider": "anthropic",
+            "weight": 0.5,
+            "allowed_models": ["claude-3-5-sonnet-20241022"],
+            "key_ids": ["*"]
+          }
+        ],
+        "customer_id": "customer-acme-corp",
+        "budget": {
+          "max_limit": 500.00,
+          "reset_duration": "1M"
+        },
+        "is_active": true
+      }'
+    ```
+
+    <Note>
+      `team_id` and `customer_id` are mutually exclusive. Pass `"key_ids": ["*"]` to allow the key to use any stored provider API key, or omit/empty to deny all keys (deny-by-default).
+    </Note>
+  </Tab>
+</Tabs>
+
+## Making a request with a virtual key
+
+Once you have a `sk-bf-*` value, pass it in whichever header style your SDK expects:
+
+<CodeGroup>
+
+```bash x-bf-vk header
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-YOUR_VIRTUAL_KEY" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello from Bifrost!"}]
+  }'
+```
+
+```bash Authorization header (OpenAI style)
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-bf-YOUR_VIRTUAL_KEY" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello from Bifrost!"}]
+  }'
+```
+
+```bash x-api-key header (Anthropic style)
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: sk-bf-YOUR_VIRTUAL_KEY" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello from Bifrost!"}]
+  }'
+```
+
+</CodeGroup>
+
+## Attaching virtual keys to teams and customers
+
+Bifrost has a three-level governance hierarchy: **Customers → Teams → Virtual Keys**. Budgets are checked at every level a virtual key belongs to—if any level is over budget the request is blocked.
+
+<CardGroup cols={2}>
+  <Card title="Teams" icon="users">
+    Group virtual keys by department. Teams have their own independent budget and can optionally belong to one customer. Teams **cannot** have rate limits—those live only on virtual keys.
+  </Card>
+  <Card title="Customers" icon="building">
+    The top-level entity, typically an organization or business unit. A customer can own multiple teams and direct virtual keys, each with separate budgets.
+  </Card>
+</CardGroup>
+
+**Create a team:**
+
+```bash
+curl -X POST http://localhost:8080/api/governance/teams \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Engineering",
+    "customer_id": "customer-acme-corp",
+    "budget": {
+      "max_limit": 500.00,
+      "reset_duration": "1M"
+    }
+  }'
+```
+
+**Create a customer:**
+
+```bash
+curl -X POST http://localhost:8080/api/governance/customers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Acme Corporation",
+    "budget": {
+      "max_limit": 2000.00,
+      "reset_duration": "1M"
+    }
+  }'
+```
+
+## Enforcing virtual keys gateway-wide
+
+By default, requests without a virtual key are allowed but receive no governance checks. You can make virtual keys mandatory so that every inference request must carry one:
+
+```bash
+curl -X PUT http://localhost:8080/api/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_config": {
+      "enforce_auth_on_inference": true
+    }
+  }'
+```
+
+<Tip>
+  When enforcement is on, unauthenticated requests are rejected immediately before any provider call, so you never accidentally incur costs from ungoverned traffic.
+</Tip>
+
+## Listing models with a virtual key
+
+When you call `GET /v1/models` with a virtual key, Bifrost only queries and returns providers that the key is allowed to use. This keeps error-rate metrics clean and avoids spurious "provider not allowed" log warnings.
+
+```bash
+# Only lists providers allowed by this virtual key
+curl http://localhost:8080/v1/models \
+  -H "x-bf-vk: sk-bf-YOUR_VIRTUAL_KEY"
+```
+
+## Key expiry
+
+Virtual keys can carry an optional expiry timestamp. After expiry the key is rejected with `403` but stays visible in the dashboard for auditing. You can restore access at any time by pushing a future `expires_at`.
+
+```bash
+# Create a key that expires on a specific date
+curl -X POST http://localhost:8080/api/governance/virtual-keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Contractor Access",
+    "provider_configs": [{"provider": "openai", "allowed_models": ["gpt-4o-mini"], "key_ids": ["*"]}],
+    "expires_at": "2026-08-01T00:00:00Z"
+  }'
+
+# Extend an existing key's expiry
+curl -X PUT http://localhost:8080/api/governance/virtual-keys/{vk_id} \
+  -H "Content-Type: application/json" \
+  -d '{"expires_at": "2026-12-31T23:59:59Z"}'
+
+# Clear expiry so the key never expires
+curl -X PUT http://localhost:8080/api/governance/virtual-keys/{vk_id} \
+  -H "Content-Type: application/json" \
+  -d '{"expires_at": ""}'
+```
+
+## Error reference
+
+| HTTP status | Error type | Meaning |
+|---|---|---|
+| `400` | `virtual_key_required` | The virtual key header is missing and enforcement is on |
+| `403` | `virtual_key_blocked` | The key is inactive or expired |
+| `403` | `model_blocked` | The requested model is not in the key's allowlist |
+| `403` | `provider_blocked` | The requested provider is not configured on the key |
+| `402` | `budget_exceeded` | The key's (or its team's/customer's) budget cap has been hit |
+| `429` | `rate_limited` / `token_limited` / `request_limited` | A rate limit on the virtual key was exceeded |
+
+**Example error responses:**
+
+<CodeGroup>
+
+```json Virtual Key Not Found (400)
+{
+  "error": {
+    "type": "virtual_key_required",
+    "message": "virtual key is missing in headers"
+  }
+}
+```
+
+```json Virtual Key Blocked (403)
+{
+  "error": {
+    "type": "virtual_key_blocked",
+    "message": "Virtual key is inactive"
+  }
+}
+```
+
+```json Model Not Allowed (403)
+{
+  "error": {
+    "type": "model_blocked",
+    "message": "Model 'gpt-4o' is not allowed for this virtual key"
+  }
+}
+```
+
+```json Provider Not Allowed (403)
+{
+  "error": {
+    "type": "provider_blocked",
+    "message": "Provider 'anthropic' is not allowed for this virtual key"
+  }
+}
+```
+
+```json Budget Exceeded (402)
+{
+  "error": {
+    "type": "budget_exceeded",
+    "message": "Budget exceeded: VK budget exceeded: 105.50 > 100.00 dollars"
+  }
+}
+```
+
+```json Rate Limit Exceeded (429)
+{
+  "error": {
+    "type": "rate_limited",
+    "message": "Rate limits exceeded: [request limit exceeded (101/100, resets every 1m)]"
+  }
+}
+```
+
+</CodeGroup>
+
+## Managing virtual keys
+
+```bash
+# List all virtual keys
+curl http://localhost:8080/api/governance/virtual-keys
+
+# Get a specific virtual key
+curl http://localhost:8080/api/governance/virtual-keys/{vk_id}
+
+# Update a virtual key (e.g. raise its budget)
+curl -X PUT http://localhost:8080/api/governance/virtual-keys/{vk_id} \
+  -H "Content-Type: application/json" \
+  -d '{"budget": {"max_limit": 250.00, "reset_duration": "1M"}}'
+
+# Delete a virtual key
+curl -X DELETE http://localhost:8080/api/governance/virtual-keys/{vk_id}
+```

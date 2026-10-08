@@ -1,0 +1,304 @@
+---
+title: "Chat Completions API: Create and Stream Completions"
+sidebarTitle: "Chat Completions"
+description: "Send multi-turn conversations to any AI model through POST /v1/chat/completions, with support for streaming, fallbacks, and all standard parameters."
+---
+
+The chat completions endpoint is the core of Bifrost's unified inference layer. You send a list of messages and a `provider/model` identifier, and Bifrost routes the request to the correct upstream provider, normalizes the response, and returns it in the standard OpenAI chat completion shape. You can switch providers or models by changing a single field — no other code changes required.
+
+## Endpoint
+
+```
+POST http://your-host:8080/v1/chat/completions
+```
+
+## Request Parameters
+
+<ParamField header="x-bf-vk" type="string">
+  Your Bifrost virtual key. You can also pass it via `Authorization: Bearer`, `x-api-key`, or `x-goog-api-key`. See [Authentication](/api-reference/authentication) for details.
+</ParamField>
+
+<ParamField body="model" type="string" required>
+  The model to use, in `provider/model` format. Bifrost uses the provider prefix to route the request to the correct upstream API.
+
+  **Example:** `anthropic/claude-3-5-sonnet-20241022`
+</ParamField>
+
+<ParamField body="messages" type="array" required>
+  The conversation history as an ordered list of message objects. Each message must include a `role` and `content`.
+
+  <Expandable title="Message object fields">
+    <ParamField body="role" type="string" required>
+      The speaker's role. One of `system`, `user`, `assistant`, or `tool`.
+    </ParamField>
+    <ParamField body="content" type="string | array" required>
+      The message content. Pass a string for plain text, or an array of content parts for multimodal messages (text + images).
+    </ParamField>
+    <ParamField body="name" type="string">
+      An optional name for the participant. Useful for multi-agent scenarios.
+    </ParamField>
+    <ParamField body="tool_call_id" type="string">
+      For `tool` role messages, the ID of the tool call this message is responding to.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="stream" type="boolean" default="false">
+  When `true`, Bifrost streams the response as Server-Sent Events (SSE). Each event contains a partial `delta` rather than the full message. The stream ends with a `[DONE]` sentinel.
+</ParamField>
+
+<ParamField body="fallbacks" type="array">
+  An ordered list of fallback models in `provider/model` format. If the primary model fails or is unavailable, Bifrost automatically retries with each fallback in sequence. This is a Bifrost-specific extension — it has no effect when using provider-native endpoints.
+
+  **Example:** `["openai/gpt-4o", "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0"]`
+</ParamField>
+
+<ParamField body="max_tokens" type="integer">
+  The maximum number of tokens to generate in the completion. Specific limits vary by model.
+</ParamField>
+
+<ParamField body="temperature" type="number">
+  Sampling temperature between `0` and `2`. Higher values produce more random output; lower values produce more deterministic output. Defaults to the model's own default.
+</ParamField>
+
+<ParamField body="top_p" type="number">
+  Nucleus sampling parameter between `0` and `1`. The model considers tokens comprising the top `top_p` probability mass.
+</ParamField>
+
+<ParamField body="frequency_penalty" type="number">
+  Number between `-2.0` and `2.0`. Positive values decrease the likelihood of the model repeating the same tokens verbatim.
+</ParamField>
+
+<ParamField body="presence_penalty" type="number">
+  Number between `-2.0` and `2.0`. Positive values increase the likelihood that the model introduces new topics.
+</ParamField>
+
+<ParamField body="stop" type="string | array">
+  Up to four sequences at which the model stops generating further tokens.
+</ParamField>
+
+<ParamField body="seed" type="integer">
+  If specified, Bifrost makes a best effort to sample deterministically. Reproducibility is not guaranteed across providers.
+</ParamField>
+
+<ParamField body="tools" type="array">
+  A list of tool definitions the model may call. Each tool must have a `type` of `"function"` and a `function` object with `name`, `description`, and `parameters`.
+</ParamField>
+
+<ParamField body="tool_choice" type="string | object">
+  Controls which tool (if any) the model calls. Pass `"none"`, `"auto"`, `"required"`, or a specific tool object.
+</ParamField>
+
+<ParamField body="response_format" type="object">
+  Specifies the output format. Use `{ "type": "json_object" }` to enable JSON mode or `{ "type": "json_schema", "json_schema": { ... } }` for structured outputs (model support varies).
+</ParamField>
+
+## Examples
+
+### Basic request
+
+<CodeGroup>
+
+```bash cURL
+curl http://your-host:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-your-virtual-key" \
+  -d '{
+    "model": "anthropic/claude-3-5-sonnet-20241022",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a concise technical assistant."
+      },
+      {
+        "role": "user",
+        "content": "What is a GPU kernel?"
+      }
+    ],
+    "max_tokens": 256,
+    "temperature": 0.3
+  }'
+```
+
+```python Python (OpenAI SDK)
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://your-host:8080/v1",
+    api_key="sk-bf-your-virtual-key",
+)
+
+response = client.chat.completions.create(
+    model="anthropic/claude-3-5-sonnet-20241022",
+    messages=[
+        {"role": "system", "content": "You are a concise technical assistant."},
+        {"role": "user", "content": "What is a GPU kernel?"},
+    ],
+    max_tokens=256,
+    temperature=0.3,
+)
+print(response.choices[0].message.content)
+```
+
+</CodeGroup>
+
+### Example response
+
+```json
+{
+  "id": "chatcmpl-9xKmT3bNvYoP",
+  "object": "chat.completion",
+  "created": 1720000000,
+  "model": "claude-3-5-sonnet-20241022",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "A GPU kernel is a function that runs in parallel across many GPU cores simultaneously. Unlike CPU code that executes sequentially, a kernel is launched with a grid of threads — each thread executes the same function but typically operates on a different piece of data, enabling massive data-parallelism."
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 32,
+    "completion_tokens": 58,
+    "total_tokens": 90,
+    "cost": {
+      "input_tokens_cost": 0.000096,
+      "output_tokens_cost": 0.000870,
+      "total_cost": 0.000966
+    }
+  },
+  "extra_fields": {
+    "request_type": "chat_completion",
+    "model_requested": "anthropic/claude-3-5-sonnet-20241022",
+    "model_deployment": "anthropic/claude-3-5-sonnet-20241022",
+    "latency": 1243
+  }
+}
+```
+
+### Streaming request
+
+Set `"stream": true` to receive incremental tokens as they are generated. Each SSE event carries a `delta` with the new token(s). The stream ends with `data: [DONE]`.
+
+```bash
+curl http://your-host:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-your-virtual-key" \
+  --no-buffer \
+  -d '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Count from 1 to 5."}],
+    "stream": true
+  }'
+```
+
+Each streamed event looks like this:
+
+```
+data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1720000001,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"1"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1720000001,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":", 2"},"finish_reason":null}]}
+
+data: [DONE]
+```
+
+### Request with fallbacks
+
+If `anthropic/claude-3-5-sonnet-20241022` is unavailable or returns an error, Bifrost automatically retries with `openai/gpt-4o` and then `bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0`.
+
+```bash
+curl http://your-host:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-your-virtual-key" \
+  -d '{
+    "model": "anthropic/claude-3-5-sonnet-20241022",
+    "fallbacks": [
+      "openai/gpt-4o",
+      "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0"
+    ],
+    "messages": [{"role": "user", "content": "Summarise this in one sentence."}]
+  }'
+```
+
+## Response Fields
+
+<ResponseField name="id" type="string">
+  Unique identifier for this completion request.
+</ResponseField>
+
+<ResponseField name="choices" type="array">
+  Array of completion choices. Most requests return exactly one choice.
+
+  <Expandable title="Choice object fields">
+    <ResponseField name="index" type="integer">
+      Zero-based index of this choice.
+    </ResponseField>
+    <ResponseField name="finish_reason" type="string">
+      Why generation stopped. Common values: `stop`, `length`, `tool_calls`, `end_turn`.
+    </ResponseField>
+    <ResponseField name="message" type="object">
+      The generated message. Contains `role`, `content`, and optionally `tool_calls`.
+    </ResponseField>
+    <ResponseField name="delta" type="object">
+      Present in streaming responses only. Contains the incremental content for this chunk.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="model" type="string">
+  The model that actually served the request (may differ from the requested model if a fallback was used).
+</ResponseField>
+
+<ResponseField name="usage" type="object">
+  Token counts and cost breakdown for the request.
+
+  <Expandable title="Usage fields">
+    <ResponseField name="prompt_tokens" type="integer">Number of tokens in the input.</ResponseField>
+    <ResponseField name="completion_tokens" type="integer">Number of tokens in the output.</ResponseField>
+    <ResponseField name="total_tokens" type="integer">Sum of prompt and completion tokens.</ResponseField>
+    <ResponseField name="cost" type="object">Itemized cost breakdown in USD.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="extra_fields" type="object">
+  Bifrost-specific metadata added to every response.
+
+  <Expandable title="Extra fields">
+    <ResponseField name="request_type" type="string">The type of request (e.g., `chat_completion`).</ResponseField>
+    <ResponseField name="model_requested" type="string">The model you originally requested.</ResponseField>
+    <ResponseField name="model_deployment" type="string">The model that ultimately handled the request.</ResponseField>
+    <ResponseField name="latency" type="integer">End-to-end latency in milliseconds, including upstream provider time.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Error Responses
+
+| Status | Code | Meaning |
+|---|---|---|
+| `400` | `invalid_request_error` | Missing required field, malformed JSON, or unsupported parameter |
+| `400` | `virtual_key_required` | No auth header provided and `enforce_auth_on_inference` is enabled |
+| `403` | `virtual_key_blocked` | Virtual key exists but lacks permission for this model or provider |
+| `500` | `upstream_error` | The upstream provider returned an error that Bifrost could not recover from |
+
+```json
+{
+  "event_id": "evt_03def",
+  "type": "error",
+  "is_bifrost_error": true,
+  "status_code": 400,
+  "error": {
+    "type": "invalid_request_error",
+    "code": "missing_required_field",
+    "message": "Field 'messages' is required.",
+    "param": "messages",
+    "event_id": "evt_03def"
+  },
+  "extra_fields": {
+    "model_requested": "openai/gpt-4o",
+    "request_type": "chat_completion"
+  }
+}
+```

@@ -1,0 +1,125 @@
+---
+title: "Use Bifrost as a Drop-in AI SDK Replacement"
+sidebarTitle: "Drop-in Replacement"
+description: "Replace any AI SDK by changing only your base_url. Instantly gain fallbacks, load balancing, semantic caching, and governance without rewriting application code."
+---
+
+Bifrost acts as a protocol-compatible proxy for the most popular AI SDKs. Because it speaks the same wire format as OpenAI, Anthropic, and other providers, you only need to change one line in your existing code — the `base_url` — to route all traffic through the gateway. Everything else, from request shapes to response objects to streaming chunks, stays exactly the same.
+
+## How It Works
+
+Bifrost exposes **100% API-compatible endpoints** for each supported SDK. When your client sends a request to `http://localhost:8080/openai`, Bifrost receives it, applies your configured policies (retries, fallbacks, caching, governance), and forwards it to the correct upstream provider. The response is returned in the format your SDK already expects, so no deserialization changes are needed.
+
+Your API keys are stored and rotated centrally inside Bifrost. Pass your Bifrost **virtual key** as the `api_key` parameter — the actual provider credentials never need to live in application code.
+
+## Before & After
+
+The migration to Bifrost is literally a one-line change:
+
+```python Before (direct to OpenAI)
+import openai
+
+client = openai.OpenAI(
+    api_key="sk-your-openai-key" # [!code --]
+)
+```
+
+```python After (through Bifrost)
+import openai
+
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",  # [!code ++]
+    api_key="your-bifrost-virtual-key"  # Pass your Bifrost virtual key # [!code ++]
+)
+```
+
+The same pattern applies to every other supported SDK — just point `base_url` at the corresponding Bifrost endpoint.
+
+## Supported SDKs
+
+Bifrost currently provides drop-in compatibility for the following SDKs and frameworks:
+
+<CardGroup cols={2}>
+  <Card title="OpenAI SDK" icon="robot" href="/integrations/openai-sdk">
+    Python and Node.js — endpoint `/openai`
+  </Card>
+  <Card title="Anthropic SDK" icon="message" href="/integrations/anthropic-sdk">
+    Python and TypeScript — endpoint `/anthropic`
+  </Card>
+  <Card title="LangChain" icon="link" href="/integrations/langchain">
+    Python and JavaScript — endpoint `/langchain`
+  </Card>
+  <Card title="LiteLLM" icon="bolt" href="/integrations/litellm">
+    Python — endpoint `/litellm`
+  </Card>
+</CardGroup>
+
+<Note>
+  Provider compatibility depends on what both the SDK and Bifrost support. If you target a model from a provider that Bifrost has not been configured with, the request will fail. See [Supported Providers](/concepts/providers) for the full list.
+</Note>
+
+## What You Gain Instantly
+
+Once you redirect any SDK to Bifrost, you unlock the following features without any further code changes:
+
+<Steps>
+  <Step title="Automatic Retries & Fallbacks">
+    Bifrost retries failed requests and falls over to a secondary provider or model automatically, keeping your application resilient to provider outages.
+  </Step>
+  <Step title="Load Balancing">
+    Distribute traffic across multiple API keys or provider accounts to stay within rate limits and reduce per-key cost concentration.
+  </Step>
+  <Step title="Semantic Caching">
+    Semantically similar prompts return cached responses, cutting latency and provider spend for repeated or near-duplicate queries.
+  </Step>
+  <Step title="Governance & Virtual Keys">
+    Assign virtual keys to teams or services to enforce per-key budgets, rate limits, and model allow-lists without exposing real provider credentials.
+  </Step>
+  <Step title="Observability">
+    Every request is logged with token counts, latency, cost, and provider metadata. Export to OpenTelemetry, Prometheus, or Bifrost's built-in dashboard.
+  </Step>
+  <Step title="Multi-Provider Model Routing">
+    Use provider-prefixed model names (e.g. `anthropic/claude-3-5-sonnet-20241022`) through any SDK to access models from multiple providers through a single client instance.
+  </Step>
+</Steps>
+
+## Provider-Prefixed Models
+
+One especially powerful feature you gain immediately is the ability to reach any configured provider through the same client. Prefix the model name with `provider/` and Bifrost handles the protocol translation:
+
+```python
+import openai
+
+# Single client, many providers
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",
+    api_key="your-bifrost-virtual-key"
+)
+
+# OpenAI (default)
+client.chat.completions.create(model="gpt-4o-mini", messages=[...])
+
+# Anthropic Claude through the OpenAI SDK
+client.chat.completions.create(model="anthropic/claude-3-5-sonnet-20241022", messages=[...])
+
+# Google Vertex Gemini through the OpenAI SDK
+client.chat.completions.create(model="vertex/gemini-pro", messages=[...])
+
+# Azure OpenAI
+client.chat.completions.create(model="azure/gpt-4o", messages=[...])
+
+# Local Ollama
+client.chat.completions.create(model="ollama/llama3.1:8b", messages=[...])
+```
+
+<Tip>
+  You can also use a gradual rollout strategy — start by routing a small percentage of traffic through Bifrost, verify parity, then switch fully. Use an environment variable or feature flag to toggle `base_url` between the direct provider URL and your Bifrost host.
+</Tip>
+
+## Next Steps
+
+- **[OpenAI SDK](/integrations/openai-sdk)** — Python and Node.js setup details
+- **[Anthropic SDK](/integrations/anthropic-sdk)** — Claude client setup details
+- **[LangChain](/integrations/langchain)** — ChatOpenAI and ChatAnthropic via Bifrost
+- **[LiteLLM](/integrations/litellm)** — litellm.completion with Bifrost as backend
+- **[Retries & Fallbacks](/features/automatic-fallbacks)** — Configure failover policies

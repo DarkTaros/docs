@@ -1,0 +1,494 @@
+---
+title: "Virtual Keys API: Create and Manage Governance Keys"
+sidebarTitle: "Virtual Keys API"
+description: "Full CRUD REST endpoints for virtual keys — Bifrost's primary governance entity for access control, provider routing, budgets, and rate limits."
+---
+
+Virtual keys are the primary governance entity in Bifrost. Every inference request can carry a virtual key (via `x-bf-vk`, `Authorization`, or `x-api-key`) and Bifrost enforces the attached provider allowlist, spend budget, and rate limits before forwarding the call upstream. You manage virtual keys through the management API, which requires a `Bearer` token in the `Authorization` header — not a virtual key itself.
+
+<Note>
+  All management endpoints live under `/api/governance/` and require `Authorization: Bearer <admin-api-key>`. Virtual keys, dashboard session tokens, and `x-api-key` headers are **not** accepted on management routes.
+</Note>
+
+---
+
+## List virtual keys
+
+<Note>
+  `GET /api/governance/virtual-keys`
+</Note>
+
+Returns a paginated list of all virtual keys and their full configurations, including attached budgets, rate limits, provider configs, and team/customer associations.
+
+### Query parameters
+
+<ParamField query="limit" type="integer">
+  Maximum number of virtual keys to return. Must be `≥ 0`.
+</ParamField>
+
+<ParamField query="offset" type="integer">
+  Number of virtual keys to skip for pagination. Must be `≥ 0`.
+</ParamField>
+
+<ParamField query="search" type="string">
+  Case-insensitive substring match against virtual key name.
+</ParamField>
+
+<ParamField query="customer_id" type="string">
+  Filter results to keys belonging to this customer ID.
+</ParamField>
+
+<ParamField query="team_id" type="string">
+  Filter results to keys belonging to this team ID.
+</ParamField>
+
+<ParamField query="sort_by" type="string">
+  Sort field. One of `name`, `budget_spent`, `created_at`, `status`.
+</ParamField>
+
+<ParamField query="order" type="string">
+  Sort direction: `asc` or `desc`.
+</ParamField>
+
+### Example
+
+<CodeGroup>
+```bash cURL
+curl -X GET https://your-bifrost-host/api/governance/virtual-keys \
+  -H "Authorization: Bearer <admin-api-key>"
+```
+
+```json Response 200
+{
+  "virtual_keys": [
+    {
+      "id": "vk_abc123",
+      "name": "Engineering Team API",
+      "value": "sk-bf-xxxxxxxxxxxx",
+      "is_active": true,
+      "description": "Main key for the engineering team",
+      "team_id": "team-eng-001",
+      "customer_id": null,
+      "expires_at": null,
+      "created_at": "2024-03-01T00:00:00Z",
+      "updated_at": "2024-06-15T10:30:00Z",
+      "provider_configs": [
+        {
+          "id": 1,
+          "provider": "openai",
+          "weight": 1,
+          "allowed_models": ["gpt-4o-mini", "gpt-4o"]
+        }
+      ],
+      "budgets": [
+        {
+          "id": "bgt_001",
+          "max_limit": 100.00,
+          "reset_duration": "1M",
+          "current_usage": 23.45,
+          "last_reset": "2024-06-01T00:00:00Z"
+        }
+      ],
+      "rate_limit": {
+        "token_max_limit": 100000,
+        "token_reset_duration": "1h",
+        "request_max_limit": 500,
+        "request_reset_duration": "1m"
+      }
+    }
+  ],
+  "count": 1,
+  "total_count": 1,
+  "limit": 25,
+  "offset": 0
+}
+```
+</CodeGroup>
+
+---
+
+## Create a virtual key
+
+<Note>
+  `POST /api/governance/virtual-keys`
+</Note>
+
+Creates a new virtual key. The returned `value` field contains the `sk-bf-*` token that callers pass in inference requests. Store it securely — it is returned only once at creation time.
+
+<Tip>
+  `provider_configs` and `mcp_configs` are **deny-by-default**: omitting or passing an empty array means no providers (or no MCP tools) are accessible through this key.
+</Tip>
+
+### Request body
+
+<ParamField body="name" type="string" required>
+  Human-readable display name for the virtual key.
+</ParamField>
+
+<ParamField body="description" type="string">
+  Optional free-text description.
+</ParamField>
+
+<ParamField body="provider_configs" type="array">
+  List of provider configurations that define which providers and models are accessible. Empty array means no providers are allowed.
+
+  <Expandable title="provider_configs fields">
+    <ParamField body="provider" type="string" required>
+      Provider identifier, e.g. `openai`, `anthropic`, `bedrock`, `vertex`.
+    </ParamField>
+    <ParamField body="weight" type="number" required>
+      Relative routing weight for load balancing across providers. Weights across all entries should sum to `1`.
+    </ParamField>
+    <ParamField body="allowed_models" type="array">
+      Allowlist of model names. Requests for models not in this list are rejected with `403`.
+    </ParamField>
+    <ParamField body="blacklisted_models" type="array">
+      Denylist of model names. Takes precedence over `allowed_models`.
+    </ParamField>
+    <ParamField body="allow_all_keys" type="boolean">
+      When `true`, all configured API keys for this provider may be used. When `false`, only keys listed in `keys` may be used.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="team_id" type="string">
+  Assign this virtual key to a team. Mutually exclusive with `customer_id`.
+</ParamField>
+
+<ParamField body="customer_id" type="string">
+  Assign this virtual key directly to a customer. Mutually exclusive with `team_id`.
+</ParamField>
+
+<ParamField body="budgets" type="array">
+  One or more budget quotas assigned directly to this virtual key.
+
+  <Expandable title="budget fields">
+    <ParamField body="max_limit" type="number" required>
+      Maximum USD spend allowed before requests are blocked (`402`).
+    </ParamField>
+    <ParamField body="reset_duration" type="string" required>
+      How often the budget resets. Accepted values: `1m`, `1h`, `1d`, `1w`, `1M`, `1Y`.
+    </ParamField>
+    <ParamField body="calendar_aligned" type="boolean" default="false">
+      When `true`, resets at UTC calendar boundaries (day, week, month, year) rather than on a rolling window.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="rate_limit" type="object">
+  Token- and request-based rate limits applied at the virtual key level.
+
+  <Expandable title="rate_limit fields">
+    <ParamField body="token_max_limit" type="integer">
+      Maximum tokens allowed per `token_reset_duration` window.
+    </ParamField>
+    <ParamField body="token_reset_duration" type="string">
+      Reset period for the token limit, e.g. `1h`.
+    </ParamField>
+    <ParamField body="request_max_limit" type="integer">
+      Maximum requests allowed per `request_reset_duration` window.
+    </ParamField>
+    <ParamField body="request_reset_duration" type="string">
+      Reset period for the request limit, e.g. `1m`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="is_active" type="boolean">
+  Whether this key is active. Inactive keys return `403` on all inference attempts.
+</ParamField>
+
+<ParamField body="expires_at" type="string">
+  Optional RFC3339 timestamp. Must be in the future. Once expired the key returns `403` with `"Virtual key has expired"`. Omit for a key that never expires.
+</ParamField>
+
+<ParamField body="calendar_aligned" type="boolean" default="false">
+  Global calendar-alignment flag for all budgets on this key.
+</ParamField>
+
+### Example
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://your-bifrost-host/api/governance/virtual-keys \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Engineering Team API",
+    "description": "Main key for the engineering team",
+    "provider_configs": [
+      {
+        "provider": "openai",
+        "weight": 0.6,
+        "allowed_models": ["gpt-4o-mini", "gpt-4o"],
+        "allow_all_keys": true
+      },
+      {
+        "provider": "anthropic",
+        "weight": 0.4,
+        "allowed_models": ["claude-3-5-sonnet-20241022"],
+        "allow_all_keys": true
+      }
+    ],
+    "team_id": "team-eng-001",
+    "budgets": [
+      {
+        "max_limit": 100.00,
+        "reset_duration": "1M",
+        "calendar_aligned": true
+      }
+    ],
+    "rate_limit": {
+      "token_max_limit": 100000,
+      "token_reset_duration": "1h",
+      "request_max_limit": 500,
+      "request_reset_duration": "1m"
+    },
+    "is_active": true,
+    "expires_at": "2026-01-01T00:00:00Z"
+  }'
+```
+
+```json Response 200
+{
+  "message": "Virtual key created successfully",
+  "virtual_key": {
+    "id": "vk_abc123",
+    "name": "Engineering Team API",
+    "value": "sk-bf-xxxxxxxxxxxxxxxxxxxx",
+    "is_active": true,
+    "description": "Main key for the engineering team",
+    "team_id": "team-eng-001",
+    "customer_id": null,
+    "expires_at": "2026-01-01T00:00:00Z",
+    "created_at": "2024-06-15T10:00:00Z",
+    "updated_at": "2024-06-15T10:00:00Z",
+    "provider_configs": [
+      {
+        "id": 1,
+        "provider": "openai",
+        "weight": 0.6,
+        "allowed_models": ["gpt-4o-mini", "gpt-4o"]
+      },
+      {
+        "id": 2,
+        "provider": "anthropic",
+        "weight": 0.4,
+        "allowed_models": ["claude-3-5-sonnet-20241022"]
+      }
+    ],
+    "budgets": [
+      {
+        "id": "bgt_001",
+        "max_limit": 100.00,
+        "reset_duration": "1M",
+        "current_usage": 0.00,
+        "calendar_aligned": true
+      }
+    ],
+    "rate_limit": {
+      "token_max_limit": 100000,
+      "token_reset_duration": "1h",
+      "request_max_limit": 500,
+      "request_reset_duration": "1m",
+      "token_current_usage": 0,
+      "request_current_usage": 0
+    }
+  }
+}
+```
+</CodeGroup>
+
+### Response fields
+
+<ResponseField name="message" type="string" required>
+  Human-readable status message.
+</ResponseField>
+
+<ResponseField name="virtual_key" type="object" required>
+  The created virtual key configuration.
+
+  <Expandable title="virtual_key fields">
+    <ResponseField name="id" type="string">Unique virtual key ID.</ResponseField>
+    <ResponseField name="name" type="string">Display name.</ResponseField>
+    <ResponseField name="value" type="string">The `sk-bf-*` token to use in inference requests. Returned only at creation time.</ResponseField>
+    <ResponseField name="is_active" type="boolean">Whether the key can be used for inference.</ResponseField>
+    <ResponseField name="expires_at" type="string">Expiry timestamp, or `null` if never.</ResponseField>
+    <ResponseField name="team_id" type="string">Assigned team ID, or `null`.</ResponseField>
+    <ResponseField name="customer_id" type="string">Assigned customer ID, or `null`.</ResponseField>
+    <ResponseField name="provider_configs" type="array">Provider routing and model allowlist configs.</ResponseField>
+    <ResponseField name="budgets" type="array">Budget records with current usage.</ResponseField>
+    <ResponseField name="rate_limit" type="object">Rate limit config with current usage counters.</ResponseField>
+    <ResponseField name="created_at" type="string">ISO 8601 creation timestamp.</ResponseField>
+    <ResponseField name="updated_at" type="string">ISO 8601 last-updated timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## Get a virtual key
+
+<Note>
+  `GET /api/governance/virtual-keys/{id}`
+</Note>
+
+Returns the full configuration for a single virtual key by its ID.
+
+### Path parameters
+
+<ParamField path="id" type="string" required>
+  The virtual key ID to retrieve.
+</ParamField>
+
+### Example
+
+<CodeGroup>
+```bash cURL
+curl -X GET https://your-bifrost-host/api/governance/virtual-keys/vk_abc123 \
+  -H "Authorization: Bearer <admin-api-key>"
+```
+
+```json Response 200
+{
+  "message": "Virtual key retrieved successfully",
+  "virtual_key": {
+    "id": "vk_abc123",
+    "name": "Engineering Team API",
+    "value": "sk-bf-xxxxxxxxxxxxxxxxxxxx",
+    "is_active": true,
+    "team_id": "team-eng-001"
+  }
+}
+```
+</CodeGroup>
+
+---
+
+## Update a virtual key
+
+<Note>
+  `PUT /api/governance/virtual-keys/{id}`
+</Note>
+
+Updates an existing virtual key. All body fields are optional — only provided fields are changed. Passing `provider_configs` **replaces** the entire provider config array; passing `budgets` **replaces** all direct virtual-key budget records.
+
+### Path parameters
+
+<ParamField path="id" type="string" required>
+  The virtual key ID to update.
+</ParamField>
+
+### Request body
+
+All fields are optional. See [Create a virtual key](#create-a-virtual-key) for field descriptions.
+
+<ParamField body="name" type="string">Updated display name.</ParamField>
+<ParamField body="description" type="string">Updated description.</ParamField>
+<ParamField body="provider_configs" type="array">Replaces all provider configurations.</ParamField>
+<ParamField body="team_id" type="string">Reassign to a different team.</ParamField>
+<ParamField body="customer_id" type="string">Reassign to a different customer.</ParamField>
+<ParamField body="budgets" type="array">Replaces all direct budget records.</ParamField>
+<ParamField body="rate_limit" type="object">Updated rate limit configuration.</ParamField>
+<ParamField body="is_active" type="boolean">Enable or disable the key.</ParamField>
+
+<ParamField body="reset_budget_usage" type="boolean">
+  When `true`, resets current usage counters for all budget records reconciled by this update.
+</ParamField>
+
+<ParamField body="expires_at" type="string">
+  RFC3339 timestamp to set a new expiry (must be in the future), empty string `""` to clear an existing expiry, or omit to leave it unchanged.
+</ParamField>
+
+### Example
+
+<CodeGroup>
+```bash cURL
+curl -X PUT https://your-bifrost-host/api/governance/virtual-keys/vk_abc123 \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "description": "Updated key for Q3 budget cycle",
+    "budgets": [
+      {
+        "max_limit": 150.00,
+        "reset_duration": "1M",
+        "calendar_aligned": true
+      }
+    ],
+    "is_active": true,
+    "reset_budget_usage": true
+  }'
+```
+
+```json Response 200
+{
+  "message": "Virtual key updated successfully",
+  "virtual_key": {
+    "id": "vk_abc123",
+    "name": "Engineering Team API",
+    "description": "Updated key for Q3 budget cycle",
+    "is_active": true,
+    "budgets": [
+      {
+        "id": "bgt_002",
+        "max_limit": 150.00,
+        "reset_duration": "1M",
+        "current_usage": 0.00,
+        "calendar_aligned": true
+      }
+    ],
+    "updated_at": "2024-07-01T09:00:00Z"
+  }
+}
+```
+</CodeGroup>
+
+---
+
+## Delete a virtual key
+
+<Note>
+  `DELETE /api/governance/virtual-keys/{id}`
+</Note>
+
+Permanently deletes a virtual key and all associated budgets and rate limit records. This action is irreversible — any in-flight requests using the key will immediately receive `403`.
+
+### Path parameters
+
+<ParamField path="id" type="string" required>
+  The virtual key ID to delete.
+</ParamField>
+
+### Example
+
+<CodeGroup>
+```bash cURL
+curl -X DELETE https://your-bifrost-host/api/governance/virtual-keys/vk_abc123 \
+  -H "Authorization: Bearer <admin-api-key>"
+```
+
+```json Response 200
+{
+  "message": "Virtual key deleted successfully"
+}
+```
+</CodeGroup>
+
+### Response fields
+
+<ResponseField name="message" type="string">
+  Confirmation message.
+</ResponseField>
+
+---
+
+## Error responses
+
+| Status | Type | Description |
+|--------|------|-------------|
+| `400` | `bad_request` | Invalid request body or field values |
+| `403` | `virtual_key_blocked` | Key is inactive or expired |
+| `404` | `not_found` | Virtual key ID does not exist |
+| `429` | `rate_limited` | Token or request rate limit exceeded |
+| `402` | `budget_exceeded` | Spend budget exceeded |
+| `500` | `internal_error` | Unexpected server error |

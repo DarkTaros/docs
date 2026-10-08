@@ -1,0 +1,190 @@
+---
+title: "Bifrost Quickstart: Your First AI Request in 5 Minutes"
+sidebarTitle: "Quickstart"
+description: "Make your first AI request through Bifrost — a high-performance gateway unifying 20+ providers through a single OpenAI-compatible API."
+---
+
+Bifrost is a high-performance AI gateway that routes requests across 20+ providers — OpenAI, Anthropic, AWS Bedrock, Google Vertex, and more — through a single unified API. In sustained benchmarks at 5,000 requests per second, Bifrost adds only **11 µs** of overhead per request. This guide gets you from zero to your first successful chat completion in under five minutes.
+
+## Prerequisites
+
+You'll need one of the following:
+
+- **Docker** — to run the gateway as a container, or
+- **Node.js 18+** — to run the gateway via `npx`
+
+You'll also need an API key from at least one supported provider (for example, an OpenAI key).
+
+---
+
+## Get Bifrost running
+
+<Steps>
+
+### Start the gateway
+
+Choose whichever method fits your workflow. Both options expose the same API on port `8080`.
+
+<CodeGroup>
+
+```bash Docker
+docker run -p 8080:8080 maximhq/bifrost
+```
+
+```bash npx
+npx -y @maximhq/bifrost
+```
+
+</CodeGroup>
+
+Bifrost starts with zero configuration. Everything can be configured through the built-in web UI or the management API — no config files required.
+
+<Tip>
+  To persist your configuration across restarts when using Docker, mount a local directory: `docker run -p 8080:8080 -v $(pwd)/data:/app/data maximhq/bifrost`
+</Tip>
+
+### Open the web UI
+
+Navigate to **[http://localhost:8080](http://localhost:8080)** in your browser. The dashboard gives you:
+
+- **Visual provider setup** — add API keys with a few clicks
+- **Real-time monitoring** — request logs, latency metrics, and usage analytics
+- **Live configuration** — changes take effect immediately, no restart needed
+
+### Add a provider key
+
+You can add a provider key either through the web UI or the management API.
+
+**Using the web UI:** Go to **Model Providers** in the sidebar, select your provider (for example, OpenAI), and paste your API key.
+
+**Using the API:**
+
+```bash
+curl -X POST http://localhost:8080/api/providers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "openai",
+    "keys": [
+      {
+        "name": "my-openai-key",
+        "value": "sk-...",
+        "models": ["*"],
+        "weight": 1.0
+      }
+    ]
+  }'
+```
+
+<Note>
+  You can reference environment variables instead of hardcoding keys. Set `"value": "env.OPENAI_API_KEY"` and export the variable before starting Bifrost.
+</Note>
+
+### Make your first request
+
+Send a chat completion request to Bifrost. The model field uses the format `provider/model-name` — Bifrost resolves the provider and handles all authentication automatically.
+
+```bash cURL
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [
+      {"role": "user", "content": "Hello, Bifrost!"}
+    ]
+  }'
+```
+
+You should receive a standard OpenAI-format response:
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! How can I help you today?"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 9,
+    "total_tokens": 21
+  }
+}
+```
+
+</Steps>
+
+---
+
+## Use your existing SDK
+
+Because Bifrost speaks the OpenAI API format, you can point any OpenAI-compatible SDK at it by changing only the base URL. No other code changes are needed.
+
+<CodeGroup>
+
+```python Python (OpenAI SDK)
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="placeholder",        # Bifrost manages real keys internally
+    base_url="http://localhost:8080/v1",
+)
+
+response = client.chat.completions.create(
+    model="openai/gpt-4o-mini",
+    messages=[
+        {"role": "user", "content": "Hello, Bifrost!"}
+    ],
+)
+
+print(response.choices[0].message.content)
+```
+
+```typescript Node.js (OpenAI SDK)
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: "placeholder",          // Bifrost manages real keys internally
+  baseURL: "http://localhost:8080/v1",
+});
+
+const response = await client.chat.completions.create({
+  model: "openai/gpt-4o-mini",
+  messages: [
+    { role: "user", content: "Hello, Bifrost!" },
+  ],
+});
+
+console.log(response.choices[0].message.content);
+```
+
+</CodeGroup>
+
+<Tip>
+  You can use bare model names like `gpt-4o-mini` instead of `openai/gpt-4o-mini`. Bifrost automatically resolves the provider via its built-in model catalog.
+</Tip>
+
+---
+
+## What's next?
+
+<CardGroup cols={2}>
+  <Card title="HTTP Gateway Setup" icon="server" href="/gateway/setup">
+    Learn about the full gateway configuration: the web UI, provider management, configuration modes, and production options.
+  </Card>
+  <Card title="Go SDK" icon="golang" href="/gateway/go-sdk">
+    Embed Bifrost directly inside your Go application for maximum performance and zero network overhead.
+  </Card>
+  <Card title="Provider Configuration" icon="sliders" href="/concepts/routing">
+    Configure multiple providers, weighted load balancing, model-specific keys, retries, and failovers.
+  </Card>
+  <Card title="SDK Integrations" icon="plug" href="/integrations/drop-in-replacement">
+    Use Bifrost as a drop-in replacement for the Anthropic, Google GenAI, LangChain, and other SDKs.
+  </Card>
+</CardGroup>

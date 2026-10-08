@@ -1,0 +1,383 @@
+---
+title: "AI Content Guardrails for Safety and Compliance Policy"
+sidebarTitle: "Guardrails"
+description: "Block harmful content, PII, and prompt injection in real time using AWS Bedrock Guardrails, Azure Content Safety, Google Model Armor, and more."
+---
+
+Bifrost Guardrails validate every LLM request and response against your content policies before they reach your models or your users. You define **Rules** (the conditions under which validation runs, expressed in CEL) and **Profiles** (the provider configurations that perform the actual evaluation). Rules reference one or more Profiles, so you can layer multiple providers for defense-in-depth—for example, running AWS Bedrock PII detection and Patronus hallucination checks on the same request.
+
+<Note>
+  Guardrails are an Enterprise feature. Activate them from **Guardrails → Configuration** in the Bifrost dashboard.
+</Note>
+
+## Supported providers
+
+<CardGroup cols={2}>
+  <Card title="AWS Bedrock Guardrails" icon="aws">
+    Enterprise content filtering, PII detection (SSN, credit card, email, and more), prompt attack prevention, and image content moderation. Supports explicit credentials or IAM role authentication.
+  </Card>
+  <Card title="Azure Content Safety" icon="microsoft">
+    Multi-modal content moderation with configurable severity thresholds for hate, violence, self-harm, and sexual content. Includes jailbreak and indirect prompt-injection shields.
+  </Card>
+  <Card title="Google Model Armor" icon="google">
+    Google Cloud policy enforcement for prompt injection, malicious URL detection, and Sensitive Data Protection. Authenticate via Workload Identity or a service account.
+  </Card>
+  <Card title="CrowdStrike AIDR" icon="shield">
+    Inline AI threat detection with policy enforcement and redaction. Bifrost forwards the request to AIDR and enforces the returned `blocked` or `transformed` decision.
+  </Card>
+  <Card title="GraySwan Cygnal" icon="eye">
+    AI safety monitoring with natural language rule definitions. Define policies like "Do not allow personally identifiable information" without writing regex or code.
+  </Card>
+  <Card title="Patronus AI" icon="star">
+    LLM security, hallucination detection, and quality evaluation. Supports evaluators including `pii`, `judge`, and custom criteria with `on-fail` explain strategy.
+  </Card>
+  <Card title="Secrets Detection" icon="key">
+    Built-in Gitleaks-backed detection for leaked API keys, tokens, private keys, and credentials. Runs entirely in-process—no external service required.
+  </Card>
+  <Card title="Custom Regex" icon="code">
+    Deterministic pattern matching including a built-in PII Detection template (email, SSN, and more). Add organization-specific patterns for redaction or rejection.
+  </Card>
+</CardGroup>
+
+## Provider capability matrix
+
+Different providers cover different threat categories. Use the matrix below to choose the right combination for your use case.
+
+| Capability | AWS Bedrock | Azure Content Safety | Google Model Armor | GraySwan | Patronus AI |
+|---|---|---|---|---|---|
+| PII Detection | ✅ | — | ✅ | — | ✅ |
+| Content Filtering | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Prompt Injection | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Toxicity Screening | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Hallucination Detection | — | — | — | — | ✅ |
+| Natural Language Rules | — | — | — | ✅ | — |
+| Image Support | ✅ | — | — | — | — |
+| Output Redaction | ✅ | — | ✅ | — | — |
+
+<Tip>
+  For maximum coverage, pair a provider strong in PII (Bedrock or Patronus) with one strong in content safety (Azure or GraySwan) and link both Profiles to the same Rule.
+</Tip>
+
+## Core concepts
+
+Guardrails are built around two objects that work together:
+
+- **Rules** define *when* and *what* to validate using a [CEL](https://cel.dev/) expression. A rule targets `input`, `output`, or `both` and can reference multiple Profiles for layered evaluation.
+- **Profiles** define *how* content is evaluated—provider credentials, endpoints, thresholds, and detection settings. Profiles are reusable across multiple Rules.
+
+### Streaming behavior
+
+When an output guardrail is active on a streaming response, Bifrost accumulates the full response before running evaluation. If the content passes, Bifrost forwards it to the client. If it is blocked or modified, Bifrost applies that result instead. This adds latency equal to the model's generation time plus guardrail evaluation time.
+
+<Warning>
+  GraySwan Cygnal is a text-only streaming exception: Bifrost sends text chunks directly to the client without forwarding them to Cygnal. If the same rule also includes another output-guardrail profile, Bifrost still waits for that profile to evaluate the completed response before it is returned to the client.
+</Warning>
+
+## Configuring a profile
+
+Profiles are managed at `/api/guardrails/{provider}` where `{provider}` is one of `secrets`, `regex`, `bedrock`, `azure`, `model-armor`, `crowdstrike-aidr`, `grayswan`, or `patronus-ai`.
+
+<CodeGroup>
+```json AWS Bedrock
+{
+  "provider_name": "bedrock",
+  "policy_name": "PII Detection Profile",
+  "enabled": true,
+  "config": {
+    "access_key": "env.AWS_ACCESS_KEY_ID",
+    "secret_key": "env.AWS_SECRET_ACCESS_KEY",
+    "guardrail_arn": "arn:aws:bedrock:us-east-1:123456789:guardrail/abc123",
+    "guardrail_version": "1",
+    "region": "us-east-1"
+  }
+}
+```
+
+```json Azure Content Safety
+{
+  "provider_name": "azure",
+  "policy_name": "Content Safety Profile",
+  "enabled": true,
+  "config": {
+    "endpoint": "https://your-resource.cognitiveservices.azure.com/",
+    "api_key": "env.AZURE_CONTENT_SAFETY_API_KEY",
+    "analyze_enabled": true,
+    "analyze_severity_threshold": "medium",
+    "jailbreak_shield_enabled": true,
+    "indirect_attack_shield_enabled": true
+  }
+}
+```
+
+```json Google Model Armor
+{
+  "provider_name": "model-armor",
+  "policy_name": "Google Model Armor Production",
+  "enabled": true,
+  "timeout": 30,
+  "config": {
+    "auth_type": "default_credential",
+    "project_id": "env.GCP_PROJECT_ID",
+    "location": "env.GCP_LOCATION",
+    "template_id": "env.GMA_TEMPLATE_ID"
+  }
+}
+```
+
+```json Patronus AI
+{
+  "provider_name": "patronus-ai",
+  "policy_name": "Patronus Quality Checks",
+  "enabled": true,
+  "config": {
+    "api_key": "env.PATRONUS_API_KEY",
+    "base_url": "https://api.patronus.ai",
+    "evaluators": [
+      {
+        "evaluator": "pii",
+        "explain_strategy": "on-fail"
+      },
+      {
+        "evaluator": "judge",
+        "criteria": "patronus:is-concise",
+        "explain_strategy": "on-fail"
+      }
+    ],
+    "capture": "none"
+  }
+}
+```
+
+```json GraySwan Cygnal
+{
+  "provider_name": "grayswan",
+  "policy_name": "Custom Safety Rules",
+  "enabled": true,
+  "config": {
+    "api_key": "env.GRAYSWAN_API_KEY",
+    "violation_threshold": 0.5,
+    "reasoning_mode": "hybrid",
+    "rules": {
+      "no_pii": "Do not allow personally identifiable information",
+      "professional_tone": "Ensure responses maintain a professional tone"
+    }
+  }
+}
+```
+
+```json Secrets Detection
+{
+  "provider_name": "secrets",
+  "policy_name": "Block Leaked Credentials",
+  "enabled": true,
+  "config": {
+    "ignored_secret_keywords": ["example", "dummy"]
+  }
+}
+```
+</CodeGroup>
+
+## Creating a rule via API
+
+```bash
+curl -X POST http://localhost:8080/api/guardrails/rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Block PII in Prompts",
+    "description": "Prevent PII from being sent to LLM providers",
+    "enabled": true,
+    "celExpression": "request.messages.exists(m, m.role == \"user\")",
+    "applyTo": "input",
+    "samplingRate": 100,
+    "timeout": 5000,
+    "selectedGuardrailProfiles": ["regex:1", "bedrock:2"]
+  }'
+```
+
+<Note>
+  The HTTP API uses camelCase field names (`celExpression`, `applyTo`, `samplingRate`). Profiles are referenced as `"<provider-type>:<config-id>"` strings, for example `"regex:1"` or `"patronus-ai:6"`.
+</Note>
+
+### CEL expression examples
+
+Rules use [Common Expression Language](https://cel.dev/) to describe when validation should fire.
+
+```cel
+# Always apply this rule
+true
+
+# Apply only to user messages
+request.messages.exists(m, m.role == "user")
+
+# Apply to messages containing sensitive keywords
+request.messages.exists(m, m.content.contains("confidential"))
+
+# Apply only to GPT-4 family models
+request.model.startsWith("gpt-4")
+
+# Apply to long prompts (>1000 chars total from user)
+request.messages.filter(m, m.role == "user").map(m, m.content.size()).sum() > 1000
+
+# Combine multiple conditions
+request.model.startsWith("gpt-4") && request.messages.exists(m, m.role == "user" && m.content.size() > 500)
+```
+
+## Attaching guardrails to requests
+
+Once you have a rule configured, you can enforce it on any request using the `x-bf-guardrail-id` header or the `bifrost_config` body field.
+
+<CodeGroup>
+```bash Single guardrail (header)
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-guardrail-id: bedrock-prod-guardrail" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Help me with this task"}]
+  }'
+```
+
+```bash Multiple guardrails (header)
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-guardrail-ids: bedrock-prod-guardrail,azure-content-safety-001" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Help me with this task"}]
+  }'
+```
+
+```bash Inline body config
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Help me with this task"}],
+    "bifrost_config": {
+      "guardrails": {
+        "input": ["bedrock-prod-guardrail"],
+        "output": ["patronus-ai-001"],
+        "async": false
+      }
+    }
+  }'
+```
+</CodeGroup>
+
+## Response handling
+
+<Tabs>
+  <Tab title="Passed (200)">
+    Validation succeeded. The response includes a `guardrails` block inside `extra_fields` with per-guardrail status and processing time.
+
+    ```json
+    {
+      "id": "chatcmpl-abc123",
+      "object": "chat.completion",
+      "model": "gpt-4o-mini",
+      "choices": [
+        {
+          "index": 0,
+          "message": {"role": "assistant", "content": "I'd be happy to help..."},
+          "finish_reason": "stop"
+        }
+      ],
+      "extra_fields": {
+        "guardrails": {
+          "input_validation": {
+            "guardrail_id": "bedrock-prod-guardrail",
+            "status": "passed",
+            "violations": [],
+            "processing_time_ms": 245
+          }
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Blocked (446)">
+    The request was blocked by a guardrail violation. The response includes the violated categories, severity, and the action taken.
+
+    ```json
+    {
+      "error": {
+        "message": "Request blocked by guardrails",
+        "type": "guardrail_violation",
+        "code": 446,
+        "details": {
+          "guardrail_id": "bedrock-prod-guardrail",
+          "validation_stage": "input",
+          "violations": [
+            {
+              "type": "PII",
+              "category": "SSN",
+              "severity": "HIGH",
+              "action": "block",
+              "text_excerpt": "My SSN is ***-**-****"
+            },
+            {
+              "type": "prompt_injection",
+              "severity": "CRITICAL",
+              "action": "block",
+              "confidence": 0.95
+            }
+          ],
+          "processing_time_ms": 198
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Warning / Redacted (246)">
+    The response was returned but with content redacted. The `bifrost_metadata` block describes what was modified.
+
+    ```json
+    {
+      "id": "chatcmpl-def456",
+      "object": "chat.completion",
+      "model": "gpt-4o-mini",
+      "choices": [
+        {
+          "index": 0,
+          "message": {"role": "assistant", "content": "Response with redacted content..."},
+          "finish_reason": "stop"
+        }
+      ],
+      "bifrost_metadata": {
+        "guardrails": {
+          "output_validation": {
+            "guardrail_id": "azure-content-safety-001",
+            "status": "warning",
+            "violations": [
+              {
+                "type": "profanity",
+                "severity": "LOW",
+                "action": "redact",
+                "modifications": 2
+              }
+            ],
+            "processing_time_ms": 187
+          }
+        }
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Best practices
+
+<AccordionGroup>
+  <Accordion title="Organize profiles by purpose">
+    Create separate profiles for different concerns—one for PII, one for content filtering, one for secrets detection. Use clear policy names like `"PII Detection - Bedrock"` rather than `"Profile 1"`. Store all credentials in environment variables, never hardcoded.
+  </Accordion>
+  <Accordion title="Layer providers for defense-in-depth">
+    Link multiple profiles to a single rule for comprehensive coverage. For example, pair Bedrock (PII + content) with Patronus (hallucination) for output rules on customer-facing applications.
+  </Accordion>
+  <Accordion title="Use sampling rates on high-traffic endpoints">
+    Set `samplingRate` to a percentage less than 100 on rules where latency is critical. Start at 100% to baseline behavior, then reduce as confidence grows.
+  </Accordion>
+  <Accordion title="Set tight timeouts">
+    Each guardrail evaluation adds latency. Set `timeout` to a value appropriate for your SLA—typically 2,000–5,000 ms for synchronous flows.
+  </Accordion>
+</AccordionGroup>

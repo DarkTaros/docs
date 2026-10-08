@@ -1,0 +1,309 @@
+---
+title: "MCP Authentication: Five Auth Types for Tool Servers"
+sidebarTitle: "Authentication"
+description: "Configure MCP server authentication using five options: None, Headers, OAuth 2.0, Per-User OAuth, or Per-User Headers — matched to your deployment model."
+---
+
+Bifrost supports five authentication types for MCP servers, designed to cover the full range of deployment models — from public local tools that need no credentials, to multi-tenant SaaS integrations where each end-user connects under their own account.
+
+Authentication is configured per MCP client and is independent of the connection protocol. STDIO connections inherit their environment from the spawned subprocess and do not have a per-call auth model. All five auth types apply to **HTTP** and **SSE** connections.
+
+## Auth Types at a Glance
+
+| `auth_type` | Who authenticates | Credential shape | When to use |
+|-------------|-------------------|------------------|-------------|
+| `none` | — | None | Public MCP servers, local STDIO tools |
+| `headers` | Admin, once | Static HTTP headers | Shared API keys, bearer tokens, custom headers |
+| `oauth` | Admin, once | OAuth 2.0 access token | Shared third-party service the whole team uses |
+| `per_user_oauth` | Each end-user, lazily | OAuth 2.0 access token per user | Per-user services like Notion, GitHub, Sentry |
+| `per_user_headers` | Each end-user, lazily | HTTP headers per user | Per-user API keys or signed tokens without OAuth |
+
+**Quick decision guide:**
+- "Our company has one shared GitHub App" → `oauth`
+- "We use an internal MCP server with a bearer token" → `headers`
+- "Each user connects to their own Notion workspace" → `per_user_oauth`
+- "Each user has their own API key for an external service" → `per_user_headers`
+- "The server is public or local and needs no credentials" → `none`
+
+## Server-Level vs. Per-User Auth
+
+Authentication comes in two flavors:
+
+- **Server-level auth** (`headers`, `oauth`) — a single shared credential the admin configures once. Every caller hits the upstream MCP server under the same identity.
+- **Per-user auth** (`per_user_oauth`, `per_user_headers`) — each end-user supplies their own credential. Bifrost stores it against the caller's identity (Virtual Key, signed-in user, or session ID) and reuses it transparently on every subsequent call.
+
+Per-user auth requires every request to carry an identity. Bifrost resolves identity in priority order: signed-in SSO user → Virtual Key → `x-bf-mcp-session-id` header.
+
+---
+
+## Auth Type Configuration
+
+<Accordion title="None — No upstream authentication">
+
+Use `auth_type: "none"` for public MCP servers and local STDIO tools that require no credentials. This is the default when `auth_type` is omitted.
+
+```bash
+curl -X POST http://localhost:8080/api/mcp/client \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "filesystem",
+    "connection_type": "stdio",
+    "stdio_config": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-filesystem"],
+      "envs": ["HOME", "PATH"]
+    },
+    "auth_type": "none",
+    "tools_to_execute": ["*"]
+  }'
+```
+
+**When to use:** Local filesystem tools, development MCP servers, public read-only APIs, or any STDIO-based server where credentials are managed via environment variables passed through `envs`.
+
+</Accordion>
+
+<Accordion title="Headers — Static shared API keys or bearer tokens">
+
+Use `auth_type: "headers"` to attach a fixed set of HTTP headers to every request Bifrost makes to the upstream MCP server. The same headers are used regardless of which caller is making the request — this is server-level auth.
+
+Header values support environment variable references using the `env.MY_VAR` syntax to keep secrets out of your config files. Values are encrypted at rest when `BIFROST_ENCRYPTION_KEY` is set.
+
+```bash
+curl -X POST http://localhost:8080/api/mcp/client \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "web_search",
+    "connection_type": "http",
+    "connection_string": "https://mcp.example.com/mcp",
+    "auth_type": "headers",
+    "headers": {
+      "Authorization": "Bearer your-api-key",
+      "X-Tenant-ID": "acme-corp"
+    },
+    "tools_to_execute": ["*"]
+  }'
+```
+
+To reference an environment variable:
+
+```json
+{
+  "headers": {
+    "Authorization": "env.MCP_API_KEY"
+  }
+}
+```
+
+**When to use:** Shared API keys the whole team uses, internal MCP servers with a single bearer token, or custom header-based authentication schemes (`X-Tenant-ID`, `X-Region`, etc.).
+
+</Accordion>
+
+<Accordion title="OAuth 2.0 — Admin authenticates once, shared token">
+
+Use `auth_type: "oauth"` for server-level OAuth: the admin authenticates once during MCP client setup, Bifrost stores the resulting token and handles automatic refresh, and every request to that server uses the same token.
+
+Bifrost handles the full OAuth Authorization Code flow including automatic token refresh, PKCE for public clients, Dynamic Client Registration (RFC 7591), and OAuth endpoint discovery from `.well-known` URLs.
+
+```bash
+curl -X POST http://localhost:8080/api/mcp/client \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "authenticated_service",
+    "connection_type": "http",
+    "connection_string": "https://api.example.com/mcp",
+    "auth_type": "oauth",
+    "oauth_config": {
+      "client_id": "your-client-id",
+      "client_secret": "your-client-secret",
+      "authorize_url": "https://auth.example.com/oauth/authorize",
+      "token_url": "https://auth.example.com/oauth/token",
+      "scopes": ["mcp:read", "mcp:write"]
+    },
+    "tools_to_execute": ["*"]
+  }'
+```
+
+The create call returns a `pending_oauth` status with an `authorize_url`. Redirect the admin to that URL. After they authorize, finalize the client:
+
+```bash
+curl -X POST http://localhost:8080/api/mcp/client/{mcp_client_id}/complete-oauth
+```
+
+For providers that support OAuth Discovery, you can omit the `authorize_url` and `token_url` and provide only `server_url`:
+
+```json
+{
+  "oauth_config": {
+    "client_id": "your-client-id",
+    "server_url": "https://api.example.com",
+    "scopes": ["mcp:read"]
+  }
+}
+```
+
+**GitHub example:**
+
+```json
+{
+  "oauth_config": {
+    "client_id": "your-github-app-id",
+    "client_secret": "your-github-app-secret",
+    "authorize_url": "https://github.com/login/oauth/authorize",
+    "token_url": "https://github.com/login/oauth/access_token",
+    "scopes": ["repo", "user"]
+  }
+}
+```
+
+**When to use:** A shared company-wide service (GitHub App, Google Workspace), any third-party MCP server where the same admin-authorized token is appropriate for all callers.
+
+</Accordion>
+
+<Accordion title="Per-User OAuth — Each user authenticates with the upstream service">
+
+Use `auth_type: "per_user_oauth"` when each end-user should connect to the upstream MCP service under their own account (their own Notion workspace, personal GitHub repos, individual Sentry organization, etc.).
+
+Bifrost uses a **lazy auth** model: the credential is requested the first time the user tries to use a tool, not upfront. The flow works identically on both the LLM Gateway (`/v1/chat/completions`) and the MCP Gateway (`/mcp`):
+
+1. The caller sends a request with an identity (Virtual Key, SSO user, or `x-bf-mcp-session-id`)
+2. The LLM requests a tool call on the per-user OAuth server
+3. Bifrost looks up an existing token for `(identity, mcp_client)`:
+   - **Found and active** → the upstream call goes out transparently
+   - **Missing or expired** → Bifrost returns an `mcp_auth_required` payload with an inline auth URL
+4. The user opens the URL, completes the upstream OAuth flow on the Bifrost consent page
+5. Bifrost stores the token against the user's identity
+6. The next request executes the tool normally — no re-auth required
+
+The auth URL appears in the LLM response's natural-language message so plain-text clients can see it:
+
+```
+Authentication required for Notion. Open this URL to connect your account:
+https://your-bifrost-domain.com/workspace/mcp-sessions/auth?flow=<flow-id>
+```
+
+Per-user OAuth clients must be created through the **Web UI** (navigate to MCP Gateway → New MCP Server → Auth Type: Per-User OAuth 2.0). Bifrost runs a test OAuth flow during setup to discover the tool list.
+
+Once created, the client configuration looks like:
+
+```json
+{
+  "name": "notion",
+  "connection_type": "http",
+  "connection_string": "https://mcp.notion.so/sse",
+  "auth_type": "per_user_oauth",
+  "oauth_config_id": "oauth_cfg_abc123",
+  "tools_to_execute": ["*"]
+}
+```
+
+Tokens are stored per `(identity, mcp_client)` and show up on the MCP Sessions page where users can re-authenticate or revoke access.
+
+**When to use:** Any service where each user has their own account — Notion, GitHub, Sentry, Linear, Salesforce, and similar per-user SaaS integrations.
+
+</Accordion>
+
+<Accordion title="Per-User Headers — Each user submits their own API key">
+
+Use `auth_type: "per_user_headers"` when the upstream MCP server authenticates with per-user API keys, signed tokens, or any other static-shape credential — but does **not** offer OAuth.
+
+Available in Bifrost **v1.5.4** and later.
+
+The admin declares the **header names** (the schema). Each end-user submits their **values** the first time they try to use a tool. Bifrost stores one credential per `(identity, mcp_client)` and reuses it transparently on every subsequent call.
+
+The lazy auth flow is identical to Per-User OAuth, except the consent page shows a form with input fields for each required header instead of an OAuth redirect.
+
+```bash
+curl -X POST http://localhost:8080/api/mcp/client \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "acme_api",
+    "connection_type": "http",
+    "connection_string": "https://api.acme.example.com/mcp",
+    "auth_type": "per_user_headers",
+    "per_user_header_keys": ["X-API-Key", "X-Tenant-ID"],
+    "user_headers": {
+      "X-API-Key": "your-admin-sample-key",
+      "X-Tenant-ID": "your-admin-sample-tenant"
+    },
+    "headers": {
+      "X-Region": {"value": "us-east-1"}
+    },
+    "tools_to_execute": ["*"]
+  }'
+```
+
+| Field | Purpose |
+|-------|---------|
+| `per_user_header_keys` | Required header names end-users must supply (the schema) |
+| `user_headers` | Admin's sample values for the one-time verify during setup (discarded after create) |
+| `headers` | Optional static admin headers sent on every per-user request alongside the user's values |
+
+On success, Bifrost runs an upstream verify with your sample values, discovers the tool list, and returns:
+
+```json
+{
+  "status": "success",
+  "message": "MCP client registered. 12 tools discovered. Each user will submit their own headers on first tool use."
+}
+```
+
+The `mcp_auth_required` response for end-users includes the submission URL:
+
+```
+Authentication required for acme_api. Open this URL to submit the required headers:
+https://your-bifrost-domain.com/workspace/mcp-sessions/auth?flow=<flow-id>&kind=headers
+```
+
+Per-user header credentials appear on the MCP Sessions page with status `active`, `needs_update` (admin changed the schema), or `orphaned` (VK lost access to the MCP server).
+
+**When to use:** Per-user API keys for a service that doesn't support OAuth — LLM provider APIs, internal tools with per-user tokens, or any service where the auth credential is a static header value unique to each user.
+
+</Accordion>
+
+---
+
+## How Per-User Auth Works (Lazy Auth)
+
+Both `per_user_oauth` and `per_user_headers` use the same lazy-auth pattern on both the LLM Gateway and the MCP Gateway:
+
+<Steps>
+  <Step title="Caller sends a request with an identity">
+    The request carries a Virtual Key, has an active SSO session, or includes `x-bf-mcp-session-id: <any-opaque-value>`.
+  </Step>
+  <Step title="Tool call hits an unauthenticated per-user server">
+    The LLM (or MCP client) requests a tool from a server configured for per-user auth.
+  </Step>
+  <Step title="Bifrost looks up the credential">
+    Bifrost checks for an existing active credential for `(identity, mcp_client)`. If found, the upstream call goes out transparently. If not found or expired, execution is blocked.
+  </Step>
+  <Step title="Bifrost returns mcp_auth_required">
+    The response includes an inline URL. For `per_user_oauth`, the URL leads to the upstream provider's authorization page via a Bifrost consent screen. For `per_user_headers`, the URL leads to a Bifrost form where the user enters their header values.
+  </Step>
+  <Step title="User completes authentication">
+    The user opens the URL, completes the flow, and Bifrost stores the credential against their identity.
+  </Step>
+  <Step title="Subsequent requests execute normally">
+    The next request from the same identity finds the stored credential and executes the tool transparently — no further auth steps required.
+  </Step>
+</Steps>
+
+## Managing Per-User Credentials
+
+All per-user credentials — OAuth tokens and submitted headers — appear on the **MCP Sessions** page. From there you can:
+
+- See each credential's status (`active`, `orphaned`, `needs_reauth`, `needs_update`)
+- **Re-authenticate** an OAuth row whose upstream token went stale
+- **Edit values** on a header row when a user's API key changes
+- **Revoke** a credential outright
+
+Bifrost also keeps credentials in sync with Virtual Key access automatically: when an admin removes a VK's access to an MCP server, the matching credentials flip to `orphaned`. When access is restored, the same rows reactivate.
+
+## Next Steps
+
+<Card title="Connecting to Servers" icon="server" href="/mcp/connecting-to-servers">
+  Learn how to add and manage MCP client connections.
+</Card>
+
+<Card title="Tool Execution" icon="play" href="/mcp/tool-execution">
+  Learn the explicit tool execution workflow and how authenticated tools are called.
+</Card>

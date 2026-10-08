@@ -1,0 +1,350 @@
+---
+title: "MCP Clients API: Register and Manage MCP Tool Servers"
+sidebarTitle: "MCP Clients API"
+description: "REST API for registering, listing, and managing MCP client connections so Bifrost can proxy tool calls to external MCP servers over stdio or HTTP."
+---
+
+Bifrost acts as a centralized MCP gateway. You register external MCP servers as **clients**, and Bifrost maintains persistent connections to each one. When an LLM returns a `tool_calls` response, your application sends the tool call to Bifrost's execute endpoint — Bifrost forwards it to the appropriate MCP server, waits for the result, and returns it in the format your chat framework expects.
+
+Each MCP client supports one of three transport modes:
+
+- **`http`** — connects to an HTTP or SSE endpoint (most common for cloud-hosted tools)
+- **`sse`** — Server-Sent Events transport
+- **`stdio`** — spawns a local subprocess (e.g. `npx`, `python`) and communicates over stdin/stdout
+
+<Note>
+  All management endpoints (`/api/mcp/*`) require `Authorization: Bearer <admin-api-key>`. The execute endpoint (`/v1/mcp/tool/execute`) accepts virtual keys.
+</Note>
+
+---
+
+## List MCP clients
+
+<Note>
+  `GET /api/mcp/clients`
+</Note>
+
+Returns a paginated list of all configured MCP clients, their discovered tools, and the virtual keys they are assigned to.
+
+### Query parameters
+
+<ParamField query="limit" type="integer" default="25">
+  Maximum clients to return (1–100).
+</ParamField>
+
+<ParamField query="offset" type="integer">
+  Number of clients to skip for pagination.
+</ParamField>
+
+<ParamField query="search" type="string">
+  Case-insensitive search by client name.
+</ParamField>
+
+<ParamField query="connection_type" type="string">
+  Comma-separated connection types to include, e.g. `http,sse`. Uses OR semantics.
+</ParamField>
+
+<ParamField query="auth_type" type="string">
+  Comma-separated auth types, e.g. `oauth,per_user_oauth`. Uses OR semantics.
+</ParamField>
+
+<ParamField query="state" type="string">
+  Filter by runtime connection state. `connected` returns only clients the engine currently reports as connected; `disconnected` returns all others.
+</ParamField>
+
+<ParamField query="disabled" type="boolean">
+  `true` returns only disabled clients; `false` returns only enabled clients. Omit for no filter.
+</ParamField>
+
+### Example
+
+<CodeGroup>
+```bash cURL
+curl -X GET "https://your-bifrost-host/api/mcp/clients?limit=10&state=connected" \
+  -H "Authorization: Bearer <admin-api-key>"
+```
+
+```json Response 200
+{
+  "clients": [
+    {
+      "config": {
+        "client_id": "mcp_weather",
+        "name": "Weather Tools",
+        "connection_string": "https://tools.example.com/weather/mcp",
+        "tools_to_execute": ["*"],
+        "tools_to_auto_execute": [],
+        "allow_on_all_virtual_keys": false,
+        "disabled": false
+      },
+      "tools": [
+        {
+          "name": "get_weather",
+          "description": "Get current weather for a location",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": { "type": "string" }
+            },
+            "required": ["location"]
+          }
+        }
+      ],
+      "vk_configs": [
+        {
+          "virtual_key_id": "vk_abc123",
+          "virtual_key_name": "Engineering Team API",
+          "tools_to_execute": ["get_weather"]
+        }
+      ]
+    }
+  ],
+  "count": 1,
+  "total_count": 1,
+  "limit": 10,
+  "offset": 0
+}
+```
+</CodeGroup>
+
+### Response fields
+
+<ResponseField name="clients" type="array" required>
+  Array of MCP client records.
+
+  <Expandable title="client fields">
+    <ResponseField name="config" type="object">
+      Client configuration including connection details and tool allowlists.
+    </ResponseField>
+    <ResponseField name="tools" type="array">
+      Tools discovered from the MCP server after connection. Each entry has `name`, `description`, and `parameters` (JSON Schema).
+    </ResponseField>
+    <ResponseField name="vk_configs" type="array">
+      Virtual key assignments for this client, including which tools each key may execute.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="count" type="integer" required>Number of clients on this page.</ResponseField>
+<ResponseField name="total_count" type="integer" required>Total clients matching the query.</ResponseField>
+<ResponseField name="limit" type="integer" required>Page size used.</ResponseField>
+<ResponseField name="offset" type="integer" required>Page offset used.</ResponseField>
+
+---
+
+## Add an MCP client
+
+<Note>
+  `POST /api/mcp/client`
+</Note>
+
+Registers a new MCP client. Bifrost immediately attempts to connect and fetches the tool list from the server. Because tools are discovered post-connection, `tool_pricing` cannot be configured at creation time — use the update endpoint after the client is connected.
+
+### Request body
+
+<ParamField body="name" type="string" required>
+  Display name for the MCP client.
+</ParamField>
+
+<ParamField body="connection_type" type="string" required>
+  Transport protocol. One of `http`, `sse`, or `stdio`.
+</ParamField>
+
+<ParamField body="connection_string" type="string">
+  Required for `http` and `sse` connection types. The full URL of the MCP server endpoint.
+</ParamField>
+
+<ParamField body="stdio_config" type="object">
+  Required for `stdio` connection type. Describes the subprocess to spawn.
+
+  <Expandable title="stdio_config fields">
+    <ParamField body="command" type="string" required>
+      The executable to run, e.g. `npx`, `python`, `node`.
+    </ParamField>
+    <ParamField body="args" type="array">
+      Command-line arguments passed to the executable, e.g. `["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]`.
+    </ParamField>
+    <ParamField body="envs" type="array">
+      Environment variables in `KEY=VALUE` format injected into the subprocess.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="client_id" type="string">
+  Optional custom identifier for the client. Auto-generated if omitted.
+</ParamField>
+
+<ParamField body="auth_type" type="string" default="none">
+  Authentication method. One of `none`, `headers`, `oauth`, `per_user_oauth`, `per_user_headers`.
+</ParamField>
+
+<ParamField body="headers" type="object">
+  Custom headers included in every request. Used when `auth_type` is `headers`.
+</ParamField>
+
+<ParamField body="tools_to_execute" type="array">
+  Allowlist of tool names. `["*"]` allows all tools; `[]` allows none; `["tool1"]` allows only `tool1`. Defaults to `[]` (deny all).
+</ParamField>
+
+<ParamField body="tools_to_auto_execute" type="array">
+  Subset of `tools_to_execute` that may be run without explicit user approval. Same wildcard semantics apply.
+</ParamField>
+
+<ParamField body="allow_on_all_virtual_keys" type="boolean" default="false">
+  When `true`, this client's tools are available to all virtual keys by default without requiring an explicit assignment.
+</ParamField>
+
+<ParamField body="tls_config" type="object">
+  TLS settings for HTTP/SSE connections.
+
+  <Expandable title="tls_config fields">
+    <ParamField body="insecure_skip_verify" type="boolean">Skip TLS certificate verification (not recommended in production).</ParamField>
+    <ParamField body="ca_cert_pem" type="string">PEM-encoded CA certificate for custom certificate authorities.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="is_ping_available" type="boolean" default="true">
+  When `true`, Bifrost uses lightweight ping messages for health checks. When `false`, it calls `listTools` for health checks instead.
+</ParamField>
+
+### Example: HTTP client
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://your-bifrost-host/api/mcp/client \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Weather Tools",
+    "connection_type": "http",
+    "connection_string": "https://tools.example.com/weather/mcp",
+    "auth_type": "headers",
+    "headers": {
+      "x-api-key": "my-weather-api-key"
+    },
+    "tools_to_execute": ["*"],
+    "tools_to_auto_execute": [],
+    "allow_on_all_virtual_keys": false
+  }'
+```
+
+```json Response 200
+{
+  "status": "success",
+  "message": "MCP client added successfully"
+}
+```
+</CodeGroup>
+
+### Example: stdio client
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://your-bifrost-host/api/mcp/client \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Filesystem Tools",
+    "connection_type": "stdio",
+    "stdio_config": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/documents"],
+      "envs": []
+    },
+    "tools_to_execute": ["read_file", "list_directory"],
+    "tools_to_auto_execute": ["list_directory"],
+    "allow_on_all_virtual_keys": false
+  }'
+```
+
+```json Response 200
+{
+  "status": "success",
+  "message": "MCP client added successfully"
+}
+```
+</CodeGroup>
+
+### Response fields
+
+<ResponseField name="status" type="string">
+  `"success"` on successful registration.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message.
+</ResponseField>
+
+---
+
+## Remove an MCP client
+
+<Note>
+  `DELETE /api/mcp/clients/{client_id}`
+</Note>
+
+Disconnects and removes an MCP client. Any virtual key assignments to this client are also removed. In-flight tool executions using this client may fail.
+
+### Path parameters
+
+<ParamField path="client_id" type="string" required>
+  The client ID to remove.
+</ParamField>
+
+### Example
+
+<CodeGroup>
+```bash cURL
+curl -X DELETE https://your-bifrost-host/api/mcp/clients/mcp_weather \
+  -H "Authorization: Bearer <admin-api-key>"
+```
+
+```json Response 200
+{
+  "status": "success",
+  "message": "MCP client removed successfully"
+}
+```
+</CodeGroup>
+
+---
+
+## Reconnect an MCP client
+
+<Note>
+  `POST /api/mcp/clients/{client_id}/reconnect`
+</Note>
+
+Forces Bifrost to drop and re-establish the connection to the MCP server. Use this after updating server credentials or recovering from a network partition. The client's tool list is refreshed on reconnect.
+
+### Path parameters
+
+<ParamField path="client_id" type="string" required>
+  The client ID to reconnect.
+</ParamField>
+
+### Example
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://your-bifrost-host/api/mcp/clients/mcp_weather/reconnect \
+  -H "Authorization: Bearer <admin-api-key>"
+```
+
+```json Response 200
+{
+  "status": "success",
+  "message": "MCP client reconnected successfully"
+}
+```
+</CodeGroup>
+
+---
+
+## Error responses
+
+| Status | Type | Description |
+|--------|------|-------------|
+| `400` | `bad_request` | Missing required fields or invalid connection config |
+| `404` | `not_found` | Client ID does not exist |
+| `500` | `internal_error` | Connection to MCP server failed or unexpected error |

@@ -1,0 +1,227 @@
+---
+title: "Create Text Embeddings with Any Supported Provider"
+sidebarTitle: "Embeddings"
+description: "Generate dense vector representations from text or token arrays via POST /v1/embeddings, routing to any embedding model across your configured providers."
+---
+
+The embeddings endpoint converts text into dense numerical vectors that capture semantic meaning. You can use these vectors for semantic search, clustering, retrieval-augmented generation (RAG), classification, and anomaly detection. Bifrost normalizes the request and response format across all supported embedding providers, so you can switch from OpenAI's `text-embedding-3-small` to a Bedrock Titan model without touching any downstream vector-store code.
+
+## Endpoint
+
+```
+POST http://your-host:8080/v1/embeddings
+```
+
+## Request Parameters
+
+<ParamField header="x-bf-vk" type="string">
+  Your Bifrost virtual key. Alternatively, pass it via `Authorization: Bearer`, `x-api-key`, or `x-goog-api-key`.
+</ParamField>
+
+<ParamField body="model" type="string" required>
+  The embedding model in `provider/model` format.
+
+  **Examples:**
+  - `openai/text-embedding-3-small`
+  - `openai/text-embedding-3-large`
+  - `bedrock/amazon.titan-embed-text-v2:0`
+  - `cohere/embed-english-v3.0`
+</ParamField>
+
+<ParamField body="input" type="string | array" required>
+  The text to embed. You can provide:
+  - A single string: `"The quick brown fox"`
+  - An array of strings: `["sentence one", "sentence two"]`
+  - An array of token ID arrays (integer arrays) for tokenized input
+
+  When you pass an array, Bifrost returns one embedding object per element, each identified by its zero-based `index`.
+</ParamField>
+
+<ParamField body="encoding_format" type="string" default="float">
+  The format of the returned embedding values.
+
+  - `float` — An array of 32-bit floating-point numbers (default)
+  - `base64` — A Base64-encoded string of packed float32 values; smaller over the wire
+
+</ParamField>
+
+<ParamField body="dimensions" type="integer">
+  The number of dimensions in the output embedding. Only supported by models that allow dimension reduction (e.g., `text-embedding-3-small` and `text-embedding-3-large`). Omit to use the model's default dimensionality.
+</ParamField>
+
+<ParamField body="fallbacks" type="array">
+  Ordered list of fallback models in `provider/model` format. Bifrost retries with each fallback if the primary model fails.
+</ParamField>
+
+## Examples
+
+### Single string input
+
+<CodeGroup>
+
+```bash cURL
+curl http://your-host:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-your-virtual-key" \
+  -d '{
+    "model": "openai/text-embedding-3-small",
+    "input": "Bifrost is a high-performance AI gateway.",
+    "encoding_format": "float"
+  }'
+```
+
+```python Python (OpenAI SDK)
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://your-host:8080/v1",
+    api_key="sk-bf-your-virtual-key",
+)
+
+response = client.embeddings.create(
+    model="openai/text-embedding-3-small",
+    input="Bifrost is a high-performance AI gateway.",
+    encoding_format="float",
+)
+print(response.data[0].embedding[:5])  # first 5 dimensions
+```
+
+</CodeGroup>
+
+### Example response
+
+```json
+{
+  "object": "list",
+  "model": "text-embedding-3-small",
+  "data": [
+    {
+      "index": 0,
+      "object": "embedding",
+      "embedding": [
+        0.0023064255,
+        -0.009327292,
+        0.015797347,
+        -0.0077780857,
+        0.0026271757,
+        "... 1531 more values ..."
+      ]
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 9,
+    "total_tokens": 9,
+    "cost": {
+      "input_tokens_cost": 0.0000018,
+      "total_cost": 0.0000018
+    }
+  },
+  "extra_fields": {
+    "request_type": "embedding",
+    "model_requested": "openai/text-embedding-3-small",
+    "model_deployment": "openai/text-embedding-3-small",
+    "latency": 312
+  }
+}
+```
+
+### Batch input
+
+Pass an array to embed multiple strings in a single round trip. Each object in `data` corresponds to an element in your input array, matched by `index`.
+
+```bash
+curl http://your-host:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-your-virtual-key" \
+  -d '{
+    "model": "openai/text-embedding-3-small",
+    "input": [
+      "What is a neural network?",
+      "How does backpropagation work?",
+      "Explain gradient descent."
+    ]
+  }'
+```
+
+<Note>
+  Batching multiple strings into a single request is significantly more efficient than making one request per string. Check your provider's documentation for maximum batch size limits.
+</Note>
+
+### Reduced-dimension embeddings
+
+Request a smaller vector size to reduce storage and retrieval costs. Requires a model that supports dimension reduction.
+
+```bash
+curl http://your-host:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-your-virtual-key" \
+  -d '{
+    "model": "openai/text-embedding-3-large",
+    "input": "Semantic search at scale.",
+    "dimensions": 256
+  }'
+```
+
+## Response Fields
+
+<ResponseField name="data" type="array">
+  Array of embedding objects, one per input element.
+
+  <Expandable title="Embedding object fields">
+    <ResponseField name="index" type="integer">
+      Zero-based index corresponding to the position of this embedding in the input array.
+    </ResponseField>
+    <ResponseField name="object" type="string">
+      Always `"embedding"`.
+    </ResponseField>
+    <ResponseField name="embedding" type="array | string">
+      The embedding vector. An array of floats when `encoding_format` is `float`, or a Base64 string when `encoding_format` is `base64`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="model" type="string">
+  The model that generated the embeddings.
+</ResponseField>
+
+<ResponseField name="usage" type="object">
+  Token usage and cost for the request.
+
+  <Expandable title="Usage fields">
+    <ResponseField name="prompt_tokens" type="integer">Number of tokens across all inputs.</ResponseField>
+    <ResponseField name="total_tokens" type="integer">Same as `prompt_tokens` for embedding requests.</ResponseField>
+    <ResponseField name="cost" type="object">Itemized cost in USD.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="extra_fields" type="object">
+  Bifrost metadata including `latency`, `model_requested`, and `model_deployment`.
+</ResponseField>
+
+## Error Responses
+
+| Status | Meaning |
+|---|---|
+| `400` | Missing `model` or `input`, or unsupported `encoding_format` |
+| `403` | Virtual key blocked from accessing the requested provider |
+| `500` | Upstream provider error |
+
+```json
+{
+  "event_id": "evt_04ghi",
+  "type": "error",
+  "is_bifrost_error": false,
+  "status_code": 400,
+  "error": {
+    "type": "invalid_request_error",
+    "code": "missing_required_field",
+    "message": "Field 'input' is required.",
+    "param": "input",
+    "event_id": "evt_04ghi"
+  },
+  "extra_fields": {
+    "model_requested": "openai/text-embedding-3-small",
+    "request_type": "embedding"
+  }
+}
+```

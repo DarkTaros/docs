@@ -1,0 +1,364 @@
+---
+title: "Bifrost Go SDK: Embed the AI Gateway in Your Go App"
+sidebarTitle: "Go SDK"
+description: "Embed Bifrost directly in your Go application for maximum performance — no HTTP server required, with native access to all providers and features."
+---
+
+The Bifrost Go SDK lets you embed the gateway directly inside your Go application as a library. Instead of running a separate HTTP server, you import `github.com/maximhq/bifrost/core`, initialise a client, and call providers in-process. This eliminates network overhead entirely and gives you type-safe access to all of Bifrost's routing, fallback, and caching features from native Go code.
+
+## Installation
+
+<Steps>
+
+### Initialise your module and install the package
+
+```bash
+go mod init my-bifrost-app
+go get github.com/maximhq/bifrost/core
+```
+
+### Set your provider key as an environment variable
+
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+You can reference environment variables in your `Account` implementation using the `env.` prefix, or pass key values directly as strings.
+
+### Implement the `Account` interface
+
+Bifrost discovers your providers and keys through a small interface you implement. Create a `main.go` file:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+
+    "github.com/maximhq/bifrost/core"
+    "github.com/maximhq/bifrost/core/schemas"
+)
+
+// MyAccount tells Bifrost which providers are available
+// and how to retrieve keys for each one.
+type MyAccount struct{}
+
+// GetConfiguredProviders returns the list of providers Bifrost should load.
+func (a *MyAccount) GetConfiguredProviders() ([]schemas.ModelProvider, error) {
+    return []schemas.ModelProvider{schemas.OpenAI}, nil
+}
+
+// GetKeysForProvider returns the API keys for a given provider.
+func (a *MyAccount) GetKeysForProvider(
+    ctx *context.Context,
+    provider schemas.ModelProvider,
+) ([]schemas.Key, error) {
+    if provider == schemas.OpenAI {
+        return []schemas.Key{
+            {
+                Value:  os.Getenv("OPENAI_API_KEY"),
+                Models: schemas.WhiteList{"*"}, // Allow any model from this provider
+                Weight: 1.0,
+            },
+        }, nil
+    }
+    return nil, fmt.Errorf("provider %s not configured", provider)
+}
+
+// GetConfigForProvider returns network and concurrency settings for a provider.
+func (a *MyAccount) GetConfigForProvider(
+    provider schemas.ModelProvider,
+) (*schemas.ProviderConfig, error) {
+    if provider == schemas.OpenAI {
+        return &schemas.ProviderConfig{
+            NetworkConfig:            schemas.DefaultNetworkConfig,
+            ConcurrencyAndBufferSize: schemas.DefaultConcurrencyAndBufferSize,
+        }, nil
+    }
+    return nil, fmt.Errorf("provider %s not configured", provider)
+}
+```
+
+### Initialise the client and make your first request
+
+```go
+func main() {
+    // Initialise the Bifrost client with your account implementation.
+    client, err := bifrost.Init(context.Background(), schemas.BifrostConfig{
+        Account: &MyAccount{},
+    })
+    if err != nil {
+        panic(err)
+    }
+    defer client.Shutdown()
+
+    // Build the message slice.
+    messages := []schemas.ChatMessage{
+        {
+            Role: schemas.ChatMessageRoleUser,
+            Content: &schemas.ChatMessageContent{
+                ContentStr: schemas.Ptr("Hello, Bifrost!"),
+            },
+        },
+    }
+
+    // Send a chat completion request.
+    response, bifrostErr := client.ChatCompletionRequest(
+        schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+        &schemas.BifrostChatRequest{
+            Provider: schemas.OpenAI,
+            Model:    "gpt-4o-mini",
+            Input:    messages,
+        },
+    )
+    if bifrostErr != nil {
+        panic(bifrostErr)
+    }
+
+    fmt.Println("Response:", *response.Choices[0].Message.Content.ContentStr)
+}
+```
+
+### Run your application
+
+```bash
+go run main.go
+# Output: Response: Hello! How can I help you today?
+```
+
+</Steps>
+
+---
+
+## Key types and concepts
+
+### `bifrost.Init`
+
+`bifrost.Init` is the entry point for the SDK. It accepts a `schemas.BifrostConfig` struct (containing your `Account` implementation and optional logger) and returns a `*bifrost.BifrostClient`.
+
+```go
+client, err := bifrost.Init(ctx, schemas.BifrostConfig{
+    Account: &MyAccount{},
+    // Logger: myLogger, // optional — see Logging below
+})
+```
+
+Call `client.Shutdown()` when your application exits to cleanly drain in-flight requests and free resources.
+
+### `schemas.Account` interface
+
+Your `Account` struct is the bridge between Bifrost and your key management. It must implement three methods:
+
+| Method | Purpose |
+|---|---|
+| `GetConfiguredProviders()` | Returns the slice of providers Bifrost should initialise |
+| `GetKeysForProvider(ctx, provider)` | Returns API keys (with weights and model filters) for a provider |
+| `GetConfigForProvider(provider)` | Returns network config and concurrency settings for a provider |
+
+### `schemas.ModelProvider`
+
+A typed string constant representing a provider. Common values:
+
+```go
+schemas.OpenAI       // "openai"
+schemas.Anthropic    // "anthropic"
+schemas.AWSBedrock   // "bedrock"
+schemas.Vertex       // "vertex"
+schemas.AzureOpenAI  // "azure"
+schemas.Groq         // "groq"
+schemas.Mistral      // "mistral"
+```
+
+### `schemas.Key`
+
+Represents a single API key with routing metadata:
+
+```go
+schemas.Key{
+    Value:  os.Getenv("OPENAI_API_KEY"), // raw value or "env.VAR_NAME"
+    Models: schemas.WhiteList{"*"},      // "*" = all models, or list specific ones
+    Weight: 1.0,                         // used for weighted load balancing
+}
+```
+
+### `schemas.BifrostChatRequest`
+
+The request struct passed to `ChatCompletionRequest`:
+
+```go
+&schemas.BifrostChatRequest{
+    Provider: schemas.OpenAI,
+    Model:    "gpt-4o-mini",
+    Input:    messages,   // []schemas.ChatMessage
+    // Params: &schemas.BifrostParams{...}, // optional — temperature, max_tokens, etc.
+}
+```
+
+---
+
+## Multiple providers with fallback
+
+You can configure multiple providers and Bifrost will automatically fail over to the next available one if a request fails. Add providers to your `Account` implementation and list them in priority order in your request:
+
+```go
+func (a *MyAccount) GetConfiguredProviders() ([]schemas.ModelProvider, error) {
+    return []schemas.ModelProvider{
+        schemas.OpenAI,
+        schemas.Anthropic,
+    }, nil
+}
+
+func (a *MyAccount) GetKeysForProvider(
+    ctx *context.Context,
+    provider schemas.ModelProvider,
+) ([]schemas.Key, error) {
+    switch provider {
+    case schemas.OpenAI:
+        return []schemas.Key{
+            {Value: os.Getenv("OPENAI_API_KEY"), Models: schemas.WhiteList{"*"}, Weight: 1.0},
+        }, nil
+    case schemas.Anthropic:
+        return []schemas.Key{
+            {Value: os.Getenv("ANTHROPIC_API_KEY"), Models: schemas.WhiteList{"*"}, Weight: 1.0},
+        }, nil
+    default:
+        return nil, fmt.Errorf("provider %s not configured", provider)
+    }
+}
+```
+
+---
+
+## Passing request parameters
+
+Use `schemas.BifrostParams` to control model behaviour — temperature, max tokens, system prompt, and more:
+
+```go
+maxTokens := 512
+temperature := 0.7
+
+response, bifrostErr := client.ChatCompletionRequest(
+    schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+    &schemas.BifrostChatRequest{
+        Provider: schemas.OpenAI,
+        Model:    "gpt-4o-mini",
+        Input:    messages,
+        Params: &schemas.BifrostParams{
+            MaxTokens:   &maxTokens,
+            Temperature: &temperature,
+        },
+    },
+)
+```
+
+---
+
+## Complete working example
+
+The following is a self-contained `main.go` you can run immediately after `go get github.com/maximhq/bifrost/core`:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+
+    "github.com/maximhq/bifrost/core"
+    "github.com/maximhq/bifrost/core/schemas"
+)
+
+type MyAccount struct{}
+
+func (a *MyAccount) GetConfiguredProviders() ([]schemas.ModelProvider, error) {
+    return []schemas.ModelProvider{schemas.OpenAI}, nil
+}
+
+func (a *MyAccount) GetKeysForProvider(
+    ctx *context.Context,
+    provider schemas.ModelProvider,
+) ([]schemas.Key, error) {
+    if provider == schemas.OpenAI {
+        return []schemas.Key{
+            {
+                Value:  os.Getenv("OPENAI_API_KEY"),
+                Models: schemas.WhiteList{"*"},
+                Weight: 1.0,
+            },
+        }, nil
+    }
+    return nil, fmt.Errorf("provider %s not configured", provider)
+}
+
+func (a *MyAccount) GetConfigForProvider(
+    provider schemas.ModelProvider,
+) (*schemas.ProviderConfig, error) {
+    if provider == schemas.OpenAI {
+        return &schemas.ProviderConfig{
+            NetworkConfig:            schemas.DefaultNetworkConfig,
+            ConcurrencyAndBufferSize: schemas.DefaultConcurrencyAndBufferSize,
+        }, nil
+    }
+    return nil, fmt.Errorf("provider %s not configured", provider)
+}
+
+func main() {
+    client, err := bifrost.Init(context.Background(), schemas.BifrostConfig{
+        Account: &MyAccount{},
+    })
+    if err != nil {
+        panic(err)
+    }
+    defer client.Shutdown()
+
+    maxTokens := 256
+
+    messages := []schemas.ChatMessage{
+        {
+            Role: schemas.ChatMessageRoleUser,
+            Content: &schemas.ChatMessageContent{
+                ContentStr: schemas.Ptr("Explain what Bifrost is in one sentence."),
+            },
+        },
+    }
+
+    response, bifrostErr := client.ChatCompletionRequest(
+        schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+        &schemas.BifrostChatRequest{
+            Provider: schemas.OpenAI,
+            Model:    "gpt-4o-mini",
+            Input:    messages,
+            Params: &schemas.BifrostParams{
+                MaxTokens: &maxTokens,
+            },
+        },
+    )
+    if bifrostErr != nil {
+        panic(bifrostErr)
+    }
+
+    fmt.Println(*response.Choices[0].Message.Content.ContentStr)
+}
+```
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="HTTP Gateway" icon="server" href="/gateway/setup">
+    Prefer a language-agnostic setup? Run Bifrost as a standalone HTTP server with a web UI.
+  </Card>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    See the five-minute end-to-end guide with curl, Python, and Node.js examples.
+  </Card>
+  <Card title="Automatic Fallbacks" icon="shield-check" href="/features/automatic-fallbacks">
+    Configure automatic failover so Bifrost switches to a backup provider when the primary fails.
+  </Card>
+  <Card title="Provider Configuration" icon="sliders" href="/concepts/providers">
+    Configure multiple providers, weighted keys, retries, and automatic failovers.
+  </Card>
+</CardGroup>

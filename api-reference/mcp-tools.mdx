@@ -1,0 +1,259 @@
+---
+title: "MCP Tools API: Execute and Log AI Tool Calls via Bifrost"
+sidebarTitle: "MCP Tools API"
+description: "Use POST /v1/mcp/tool/execute to run MCP tool calls returned by an LLM, and GET /api/logging/mcp-tool-logs to inspect execution history."
+---
+
+After an LLM returns a response with `tool_calls`, your application sends each tool call to Bifrost's execute endpoint. Bifrost resolves which MCP client hosts the named tool, forwards the arguments to that server, and returns the result in the standard chat message format — ready to be appended to your conversation and sent back to the model.
+
+This design keeps your application code simple: you never communicate directly with MCP servers, manage sessions, or handle connection failures. Bifrost handles all of that transparently.
+
+<Note>
+  The execute endpoint lives under `/v1/` and accepts **virtual keys** (`sk-bf-*`) as well as provider API keys and Bifrost auth tokens. Management endpoints under `/api/` require an admin Bearer token.
+</Note>
+
+---
+
+## Execute an MCP tool call
+
+<Note>
+  `POST /v1/mcp/tool/execute`
+</Note>
+
+Executes a single MCP tool call and returns the result as a chat `tool` message. You typically call this endpoint once for each item in the `tool_calls` array of an LLM response, then append the results to your message array before the next LLM call.
+
+### Query parameters
+
+<ParamField query="format" type="string" default="chat">
+  Response format. Use `chat` (default) for OpenAI-style tool messages, or `responses` for the Responses API format.
+</ParamField>
+
+### Request body (chat format — default)
+
+The request body is the tool call object exactly as returned by the LLM in `choices[0].message.tool_calls[*]`.
+
+<ParamField body="id" type="string" required>
+  Tool call ID from the LLM response, e.g. `call_abc123`. This value is echoed back in `tool_call_id` so the model can correlate the result.
+</ParamField>
+
+<ParamField body="type" type="string">
+  Tool call type. Should be `"function"` for all standard MCP tools.
+</ParamField>
+
+<ParamField body="function" type="object" required>
+  The function descriptor from the LLM tool call.
+
+  <Expandable title="function fields">
+    <ParamField body="name" type="string" required>
+      Name of the MCP tool to execute, e.g. `get_weather`. Must match a tool available through the virtual key's assigned MCP clients.
+    </ParamField>
+    <ParamField body="arguments" type="string" required>
+      JSON-encoded string of the arguments to pass to the tool, as returned by the LLM. Bifrost parses and forwards these to the MCP server.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Authorization
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token. Accepts a virtual key (`sk-bf-*`), a provider API key, or a Bifrost user token.
+</ParamField>
+
+### Example: full round-trip
+
+The following example shows a complete tool-use cycle: an LLM returns a tool call, your application forwards it to Bifrost, and you receive the result to continue the conversation.
+
+**Step 1 — LLM returns a tool call:**
+
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "call_abc123",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"location\": \"San Francisco, CA\"}"
+          }
+        }
+      ]
+    }
+  }]
+}
+```
+
+**Step 2 — Execute the tool call via Bifrost:**
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://your-bifrost-host/v1/mcp/tool/execute \
+  -H "Authorization: Bearer sk-bf-xxxxxxxxxxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "call_abc123",
+    "type": "function",
+    "function": {
+      "name": "get_weather",
+      "arguments": "{\"location\": \"San Francisco, CA\"}"
+    }
+  }'
+```
+
+```json Response 200
+{
+  "role": "tool",
+  "name": "get_weather",
+  "tool_call_id": "call_abc123",
+  "content": "The weather in San Francisco, CA is 68°F and partly cloudy with a light breeze from the west."
+}
+```
+</CodeGroup>
+
+**Step 3 — Append the result and continue the conversation:**
+
+```json
+{
+  "model": "gpt-4o",
+  "messages": [
+    { "role": "user", "content": "What's the weather in San Francisco?" },
+    {
+      "role": "assistant",
+      "tool_calls": [{
+        "id": "call_abc123",
+        "type": "function",
+        "function": { "name": "get_weather", "arguments": "{\"location\": \"San Francisco, CA\"}" }
+      }]
+    },
+    {
+      "role": "tool",
+      "name": "get_weather",
+      "tool_call_id": "call_abc123",
+      "content": "The weather in San Francisco, CA is 68°F and partly cloudy..."
+    }
+  ]
+}
+```
+
+### Response fields
+
+<ResponseField name="role" type="string" required>
+  Always `"tool"` in chat format.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Name of the tool that was executed.
+</ResponseField>
+
+<ResponseField name="tool_call_id" type="string">
+  Echoes the `id` from the request, used by the LLM to correlate the result.
+</ResponseField>
+
+<ResponseField name="content" type="string">
+  The tool's output. May be a plain string or, for multi-modal results, a JSON-encoded array of content blocks.
+</ResponseField>
+
+---
+
+## View tool execution logs
+
+<Note>
+  `GET /api/logging/mcp-tool-logs`
+</Note>
+
+Returns a paginated history of MCP tool executions for auditing, debugging, and cost analysis. Requires an admin Bearer token.
+
+### Query parameters
+
+<ParamField query="limit" type="integer" default="25">
+  Maximum log entries to return.
+</ParamField>
+
+<ParamField query="offset" type="integer">
+  Number of entries to skip.
+</ParamField>
+
+<ParamField query="virtual_key_id" type="string">
+  Filter logs to a specific virtual key.
+</ParamField>
+
+<ParamField query="tool_name" type="string">
+  Filter logs to a specific tool name.
+</ParamField>
+
+<ParamField query="client_id" type="string">
+  Filter logs to a specific MCP client.
+</ParamField>
+
+### Example
+
+<CodeGroup>
+```bash cURL
+curl -X GET "https://your-bifrost-host/api/logging/mcp-tool-logs?limit=5&tool_name=get_weather" \
+  -H "Authorization: Bearer <admin-api-key>"
+```
+
+```json Response 200
+{
+  "logs": [
+    {
+      "id": "log_001",
+      "tool_name": "get_weather",
+      "client_id": "mcp_weather",
+      "virtual_key_id": "vk_abc123",
+      "arguments": { "location": "San Francisco, CA" },
+      "result": "68°F and partly cloudy",
+      "duration_ms": 142,
+      "success": true,
+      "created_at": "2024-07-01T14:23:01Z"
+    }
+  ],
+  "count": 1,
+  "total_count": 1,
+  "limit": 5,
+  "offset": 0
+}
+```
+</CodeGroup>
+
+---
+
+## Session-based tool execution
+
+If you are using Bifrost's MCP gateway with per-user sessions, you can optionally pass a `session_id` to route the tool execution through an existing authenticated session. This is required when the MCP server uses per-user OAuth or per-user header credentials.
+
+<CodeGroup>
+```bash cURL — with session
+curl -X POST https://your-bifrost-host/v1/mcp/tool/execute \
+  -H "Authorization: Bearer sk-bf-xxxxxxxxxxxxxxxxxxxx" \
+  -H "x-mcp-session-id: sess_usr123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "call_xyz789",
+    "type": "function",
+    "function": {
+      "name": "list_calendar_events",
+      "arguments": "{\"date\": \"2024-07-01\"}"
+    }
+  }'
+```
+</CodeGroup>
+
+<Tip>
+  For stateless MCP servers (no auth or shared API key auth), you do not need sessions — Bifrost routes by tool name automatically.
+</Tip>
+
+---
+
+## Error responses
+
+| Status | Type | Description |
+|--------|------|-------------|
+| `400` | `bad_request` | Missing `function.name`, malformed arguments JSON, or unknown tool name |
+| `403` | `virtual_key_blocked` | Key is inactive, expired, or the tool is not in the key's allowlist |
+| `404` | `not_found` | No MCP client registered for the requested tool |
+| `402` | `budget_exceeded` | Virtual key budget exhausted |
+| `429` | `rate_limited` | Token or request rate limit exceeded |
+| `500` | `internal_error` | MCP server returned an error or connection was lost |

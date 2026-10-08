@@ -1,0 +1,88 @@
+---
+title: "Bifrost: High-Performance AI Gateway for Every Provider"
+sidebarTitle: "Introduction"
+description: "Bifrost unifies 20+ AI providers through one OpenAI-compatible API with automatic failover, load balancing, semantic caching, and enterprise governance."
+---
+
+Bifrost is a high-performance AI gateway that gives you a single API endpoint to access OpenAI, Anthropic, AWS Bedrock, Google Vertex, Azure, and 15+ more providers. With automatic failover, weighted load balancing, semantic caching, and enterprise-grade governance baked in, you can build reliable AI applications without worrying about provider outages or runaway costs.
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Send your first request through Bifrost in under 5 minutes
+  </Card>
+  <Card title="Gateway Setup" icon="server" href="/gateway/setup">
+    Deploy the HTTP gateway with a built-in web UI
+  </Card>
+  <Card title="Go SDK" icon="code" href="/gateway/go-sdk">
+    Embed Bifrost directly in your Go application
+  </Card>
+  <Card title="Drop-in Replacement" icon="plug" href="/integrations/drop-in-replacement">
+    Keep your existing SDK code — just change the base URL
+  </Card>
+</CardGroup>
+
+## Why Bifrost?
+
+Building production AI applications means dealing with rate limits, provider outages, unpredictable costs, and fragmented SDKs. Bifrost solves all of this in one place.
+
+<CardGroup cols={3}>
+  <Card title="Never Go Down" icon="shield-check">
+    Automatic failover switches to backup providers when your primary fails — zero downtime
+  </Card>
+  <Card title="Cut Costs" icon="circle-dollar-to-slot">
+    Semantic caching returns cached responses for similar queries, reducing API spend
+  </Card>
+  <Card title="One API" icon="link">
+    A single OpenAI-compatible endpoint works with every provider — no SDK switching
+  </Card>
+  <Card title="Governance" icon="lock">
+    Virtual keys control access, budgets, and rate limits per team or customer
+  </Card>
+  <Card title="Full Visibility" icon="chart-line">
+    Real-time request logs, latency histograms, and cost dashboards built in
+  </Card>
+  <Card title="MCP Gateway" icon="robot">
+    Connect AI models to external tools via the Model Context Protocol
+  </Card>
+</CardGroup>
+
+## How It Works
+
+Bifrost sits between your application and AI providers. You send requests to Bifrost using the standard OpenAI API format, and Bifrost handles routing, failover, caching, and governance — then forwards the request to the right provider.
+
+```
+Your App  →  Bifrost Gateway  →  OpenAI / Anthropic / Bedrock / ...
+                 ↑
+         Virtual Keys, Load Balancing,
+         Caching, Guardrails, Logs
+```
+
+In sustained benchmarks at 5,000 requests per second, Bifrost adds only **11 µs of overhead** per request.
+
+## Deployment Options
+
+<CardGroup cols={2}>
+  <Card title="HTTP Gateway" icon="globe" href="/gateway/setup">
+    Deploy as a standalone HTTP server with a web UI for visual configuration and real-time monitoring
+  </Card>
+  <Card title="Go SDK" icon="golang" href="/gateway/go-sdk">
+    Integrate directly into your Go application for maximum performance and zero network hop
+  </Card>
+</CardGroup>
+
+## Explore the Docs
+
+<CardGroup cols={2}>
+  <Card title="Core Concepts" icon="book" href="/concepts/virtual-keys">
+    Learn about virtual keys, providers, routing, and load balancing
+  </Card>
+  <Card title="Features" icon="stars" href="/features/automatic-fallbacks">
+    Explore fallbacks, semantic caching, observability, and plugins
+  </Card>
+  <Card title="MCP Gateway" icon="wand-magic-sparkles" href="/mcp/overview">
+    Enable AI models to discover and execute external tools dynamically
+  </Card>
+  <Card title="API Reference" icon="rectangle-terminal" href="/api-reference/overview">
+    Browse every endpoint with request and response examples
+  </Card>
+</CardGroup>

@@ -1,0 +1,113 @@
+---
+title: "Bifrost REST API Reference: Base URLs and Endpoints"
+sidebarTitle: "Overview"
+description: "Explore Bifrost's REST API: base URLs, OpenAI-compatible /v1/ endpoints, provider-specific routes, model naming, and required request headers."
+---
+
+Bifrost exposes a REST API that lets you reach every configured AI provider through a single, consistent interface. All inference endpoints follow the OpenAI request/response shape, so any client that already speaks OpenAI can talk to Bifrost with a one-line URL change. Provider-specific routes are also available when you need to send a request in a provider's native format.
+
+## Base URL
+
+Every Bifrost deployment listens on port `8080` by default. Replace `your-host` with the hostname or IP address where you deployed Bifrost:
+
+```
+http://your-host:8080
+```
+
+<Note>
+  If you changed the default port in your configuration, use that port instead. TLS termination is handled at the load-balancer or reverse-proxy layer; Bifrost itself speaks plain HTTP.
+</Note>
+
+## OpenAI-Compatible Endpoints (`/v1/`)
+
+All OpenAI-compatible endpoints are mounted under the `/v1/` prefix. Bifrost normalizes the request before forwarding it to the target provider and normalizes the response before returning it to you, so you never need separate client code per provider.
+
+```
+http://your-host:8080/v1/chat/completions
+http://your-host:8080/v1/embeddings
+http://your-host:8080/v1/images/generations
+http://your-host:8080/v1/audio/speech
+http://your-host:8080/v1/audio/transcriptions
+http://your-host:8080/v1/models
+```
+
+## Provider-Specific Endpoints
+
+When you need to send a request using a provider's native API format, Bifrost exposes pass-through routes that handle authentication and routing without any schema translation:
+
+| Route prefix | Forwards to |
+|---|---|
+| `/openai/...` | OpenAI |
+| `/anthropic/...` | Anthropic |
+| `/bedrock/...` | AWS Bedrock |
+| `/gemini/...` | Google Gemini |
+
+<Tip>
+  Use the `/v1/` endpoints whenever possible. They give you automatic fallbacks, unified observability, and the ability to swap providers without changing your application code.
+</Tip>
+
+## Model Naming
+
+Bifrost uses a `provider/model` naming convention throughout every endpoint. You must prefix the model name with the provider slug:
+
+```
+openai/gpt-4o
+anthropic/claude-3-5-sonnet-20241022
+bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0
+gemini/gemini-1.5-pro
+```
+
+This convention is how Bifrost knows which upstream provider to route your request to. It is required for every inference call.
+
+## Required Headers
+
+Every request to a Bifrost inference endpoint must carry two headers:
+
+| Header | Value | Purpose |
+|---|---|---|
+| `Content-Type` | `application/json` | Tells Bifrost to parse the body as JSON |
+| `x-bf-vk` **or** `Authorization` | Your virtual key | Authenticates the request and scopes provider access |
+
+See the [Authentication](/api-reference/authentication) page for the full list of supported auth header formats.
+
+## Endpoint Groups
+
+The table below covers the core API groups documented in this reference.
+
+| Group | Method | Path | Description |
+|---|---|---|---|
+| **Models** | `GET` | `/v1/models` | List all models available across your configured providers |
+| **Chat Completions** | `POST` | `/v1/chat/completions` | Send a conversation to any model; supports streaming via SSE |
+| **Embeddings** | `POST` | `/v1/embeddings` | Generate embedding vectors from text or token arrays |
+| **Images** | `POST` | `/v1/images/generations` | Generate images from a text prompt |
+| **Images** | `POST` | `/v1/images/edits` | Edit an existing image with a text prompt and mask |
+| **Images** | `POST` | `/v1/images/variations` | Create variations of an existing image |
+| **Audio (TTS)** | `POST` | `/v1/audio/speech` | Convert text to speech audio; supports streaming |
+| **Audio (STT)** | `POST` | `/v1/audio/transcriptions` | Transcribe an audio file to text |
+| **Count Tokens** | `POST` | `/v1/responses/input_tokens` | Count tokens for a set of messages before sending them |
+
+## Error Shape
+
+All error responses from Bifrost share a consistent JSON shape regardless of which provider was targeted:
+
+```json
+{
+  "event_id": "evt_01abc",
+  "type": "error",
+  "is_bifrost_error": true,
+  "status_code": 400,
+  "error": {
+    "type": "invalid_request_error",
+    "code": "virtual_key_required",
+    "message": "A virtual key is required to authenticate this request.",
+    "param": null,
+    "event_id": "evt_01abc"
+  },
+  "extra_fields": {
+    "model_requested": "openai/gpt-4o",
+    "request_type": "chat_completion"
+  }
+}
+```
+
+The `is_bifrost_error` flag is `true` when the error originates inside the gateway itself and `false` when it is a passthrough from an upstream provider.

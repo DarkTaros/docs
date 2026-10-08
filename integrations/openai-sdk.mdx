@@ -1,0 +1,276 @@
+---
+title: "OpenAI SDK Integration with Bifrost Gateway"
+sidebarTitle: "OpenAI SDK"
+description: "Use the OpenAI Python and Node.js SDKs pointed at Bifrost to gain fallbacks, multi-provider routing, and governance with a single base_url change."
+---
+
+Bifrost exposes a fully OpenAI-compatible endpoint at `/openai`, which means the official `openai` Python package and the `openai` Node.js package work against it without any code changes beyond setting `base_url`. Your existing request shapes, response objects, streaming events, and error types all behave identically — Bifrost handles the protocol translation and upstream routing transparently.
+
+## Endpoint
+
+Point your client at:
+
+```
+http://localhost:8080/openai
+```
+
+All OpenAI API paths (e.g. `/v1/chat/completions`, `/v1/embeddings`, `/v1/models`) are supported under this prefix.
+
+## Client Setup
+
+<CodeGroup>
+
+```python Python
+import openai
+
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",
+    api_key="your-bifrost-virtual-key"  # Pass your Bifrost virtual key
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+
+print(response.choices[0].message.content)
+```
+
+```typescript Node.js
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  baseURL: "http://localhost:8080/openai",
+  apiKey: "your-bifrost-virtual-key", // Pass your Bifrost virtual key
+});
+
+const response = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "Hello!" }],
+});
+
+console.log(response.choices[0].message.content);
+```
+
+</CodeGroup>
+
+<Note>
+  Pass your Bifrost **virtual key** as the `api_key` parameter. The virtual key identifies your team or service and enforces any budgets, rate limits, or model allow-lists you have configured. Actual provider credentials are managed inside Bifrost's provider configuration and never need to live in application code.
+</Note>
+
+## Before & After
+
+```python
+# Before — direct OpenAI connection
+client = openai.OpenAI(
+    api_key="sk-your-openai-key" # [!code --]
+)
+
+# After — through Bifrost
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",  # [!code ++]
+    api_key="your-bifrost-virtual-key"  # [!code ++]
+)
+```
+
+## Multi-Provider Routing
+
+You can reach any provider Bifrost supports through the same client by prefixing the model name with the provider slug:
+
+<CodeGroup>
+
+```python Python
+import openai
+
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",
+    api_key="your-bifrost-virtual-key"
+)
+
+# OpenAI (default — no prefix needed)
+client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello from OpenAI!"}]
+)
+
+# Anthropic Claude through the OpenAI SDK
+client.chat.completions.create(
+    model="anthropic/claude-3-5-sonnet-20241022",
+    messages=[{"role": "user", "content": "Hello from Claude!"}]
+)
+
+# Google Vertex AI
+client.chat.completions.create(
+    model="vertex/gemini-pro",
+    messages=[{"role": "user", "content": "Hello from Gemini!"}]
+)
+
+# Azure OpenAI
+client.chat.completions.create(
+    model="azure/gpt-4o",
+    messages=[{"role": "user", "content": "Hello from Azure!"}]
+)
+
+# Local Ollama
+client.chat.completions.create(
+    model="ollama/llama3.1:8b",
+    messages=[{"role": "user", "content": "Hello from Ollama!"}]
+)
+```
+
+```typescript Node.js
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  baseURL: "http://localhost:8080/openai",
+  apiKey: "your-bifrost-virtual-key",
+});
+
+// OpenAI (default — no prefix needed)
+await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "Hello from OpenAI!" }],
+});
+
+// Anthropic Claude through the OpenAI SDK
+await openai.chat.completions.create({
+  model: "anthropic/claude-3-5-sonnet-20241022",
+  messages: [{ role: "user", content: "Hello from Claude!" }],
+});
+
+// Google Vertex AI
+await openai.chat.completions.create({
+  model: "vertex/gemini-pro",
+  messages: [{ role: "user", content: "Hello from Gemini!" }],
+});
+
+// Azure OpenAI
+await openai.chat.completions.create({
+  model: "azure/gpt-4o",
+  messages: [{ role: "user", content: "Hello from Azure!" }],
+});
+
+// Local Ollama
+await openai.chat.completions.create({
+  model: "ollama/llama3.1:8b",
+  messages: [{ role: "user", content: "Hello from Ollama!" }],
+});
+```
+
+</CodeGroup>
+
+## Streaming
+
+Streaming works exactly as it does with the native OpenAI SDK — just pass `stream=True` (Python) or `stream: true` (Node.js):
+
+<CodeGroup>
+
+```python Python
+import openai
+
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",
+    api_key="your-bifrost-virtual-key"
+)
+
+with client.chat.completions.stream(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Write me a haiku about gateways."}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+```
+
+```typescript Node.js
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  baseURL: "http://localhost:8080/openai",
+  apiKey: "your-bifrost-virtual-key",
+});
+
+const stream = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "Write me a haiku about gateways." }],
+  stream: true,
+});
+
+for await (const chunk of stream) {
+  const delta = chunk.choices[0]?.delta?.content ?? "";
+  process.stdout.write(delta);
+}
+```
+
+</CodeGroup>
+
+## Virtual Keys & Custom Headers
+
+You can also pass your virtual key and any other Bifrost-specific headers via `default_headers` (Python) or `defaultHeaders` (Node.js) if you prefer to keep `api_key` as a placeholder:
+
+<CodeGroup>
+
+```python Python
+import openai
+
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",
+    api_key="dummy-key",
+    default_headers={
+        "x-bf-vk": "your-bifrost-virtual-key",  # Governance virtual key
+    }
+)
+```
+
+```typescript Node.js
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  baseURL: "http://localhost:8080/openai",
+  apiKey: "dummy-key",
+  defaultHeaders: {
+    "x-bf-vk": "your-bifrost-virtual-key", // Governance virtual key
+  },
+});
+```
+
+</CodeGroup>
+
+## Listing Models
+
+The `/openai/v1/models` endpoint returns models from all configured providers by default. Use the `x-bf-list-models-provider` header to filter by a specific provider:
+
+<CodeGroup>
+
+```python Python
+# All providers (default)
+all_models = client.models.list()
+
+# Only OpenAI models
+openai_models = client.models.list(
+    extra_headers={"x-bf-list-models-provider": "openai"}
+)
+
+# Only Anthropic models
+anthropic_models = client.models.list(
+    extra_headers={"x-bf-list-models-provider": "anthropic"}
+)
+```
+
+```typescript Node.js
+// All providers (default)
+const allModels = await openai.models.list();
+
+// Only OpenAI models
+const openaiModels = await openai.models.list({
+  headers: { "x-bf-list-models-provider": "openai" },
+});
+```
+
+</CodeGroup>
+
+## Next Steps
+
+- **[Anthropic SDK](/integrations/anthropic-sdk)** — Use Claude with Bifrost
+- **[Drop-in Replacement](/integrations/drop-in-replacement)** — Understand the migration model
+- **[Retries & Fallbacks](/features/automatic-fallbacks)** — Configure automatic failover
+- **[Governance](/concepts/virtual-keys)** — Virtual keys, budgets, and rate limits

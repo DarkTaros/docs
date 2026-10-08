@@ -1,0 +1,264 @@
+---
+title: "Anthropic SDK Integration with Bifrost Gateway"
+sidebarTitle: "Anthropic SDK"
+description: "Use the Anthropic Python and TypeScript SDKs with Bifrost by pointing base_url at /anthropic to unlock fallbacks, multi-provider routing, and governance."
+---
+
+Bifrost exposes a fully Anthropic-compatible endpoint at `/anthropic`. The official `anthropic` Python library and `@anthropic-ai/sdk` TypeScript package work against it without modification — the same `messages.create` calls, streaming patterns, and response structures you already use continue to work. Bifrost handles protocol translation, upstream key management, retries, and all the gateway features transparently.
+
+## Endpoint
+
+Point your client at:
+
+```
+http://localhost:8080/anthropic
+```
+
+All Anthropic Messages API paths (e.g. `/v1/messages`, `/v1/messages/count_tokens`) are served under this prefix.
+
+## Client Setup
+
+<CodeGroup>
+
+```python Python
+import anthropic
+
+client = anthropic.Anthropic(
+    base_url="http://localhost:8080/anthropic",
+    api_key="your-bifrost-virtual-key"  # Pass your Bifrost virtual key
+)
+
+response = client.messages.create(
+    model="anthropic/claude-3-5-sonnet-20241022",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+
+print(response.content[0].text)
+```
+
+```typescript TypeScript
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = new Anthropic({
+  baseURL: "http://localhost:8080/anthropic",
+  apiKey: "your-bifrost-virtual-key", // Pass your Bifrost virtual key
+});
+
+const response = await anthropic.messages.create({
+  model: "anthropic/claude-3-5-sonnet-20241022",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello!" }],
+});
+
+console.log(response.content[0].text);
+```
+
+</CodeGroup>
+
+<Note>
+  Pass your Bifrost **virtual key** as the `api_key` parameter. The virtual key identifies your team or service and enforces any budgets, rate limits, or model allow-lists you have configured. Real Anthropic API keys are configured inside Bifrost's provider settings and never need to live in application code.
+</Note>
+
+## Before & After
+
+```python
+# Before — direct Anthropic connection
+client = anthropic.Anthropic(
+    api_key="sk-ant-your-key" # [!code --]
+)
+
+# After — through Bifrost
+client = anthropic.Anthropic(
+    base_url="http://localhost:8080/anthropic",  # [!code ++]
+    api_key="your-bifrost-virtual-key"  # [!code ++]
+)
+```
+
+## Multi-Provider Routing
+
+The Anthropic SDK format supports cross-provider calls through Bifrost. Prefix the model name with the provider slug and Bifrost handles the translation:
+
+<CodeGroup>
+
+```python Python
+import anthropic
+
+client = anthropic.Anthropic(
+    base_url="http://localhost:8080/anthropic",
+    api_key="your-bifrost-virtual-key"
+)
+
+# Anthropic (default — no prefix needed)
+client.messages.create(
+    model="anthropic/claude-3-5-sonnet-20241022",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello from Claude!"}]
+)
+
+# OpenAI GPT models through the Anthropic SDK
+client.messages.create(
+    model="openai/gpt-4o-mini",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello from OpenAI!"}]
+)
+
+# Google Vertex Gemini through the Anthropic SDK
+client.messages.create(
+    model="vertex/gemini-pro",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello from Gemini!"}]
+)
+
+# Azure OpenAI
+client.messages.create(
+    model="azure/gpt-4o",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello from Azure!"}]
+)
+
+# Local Ollama
+client.messages.create(
+    model="ollama/llama3.1:8b",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello from Ollama!"}]
+)
+```
+
+```typescript TypeScript
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = new Anthropic({
+  baseURL: "http://localhost:8080/anthropic",
+  apiKey: "your-bifrost-virtual-key",
+});
+
+// Anthropic (default — no prefix needed)
+await anthropic.messages.create({
+  model: "anthropic/claude-3-5-sonnet-20241022",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello from Claude!" }],
+});
+
+// OpenAI GPT models through the Anthropic SDK
+await anthropic.messages.create({
+  model: "openai/gpt-4o-mini",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello from OpenAI!" }],
+});
+
+// Google Vertex Gemini through the Anthropic SDK
+await anthropic.messages.create({
+  model: "vertex/gemini-pro",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello from Gemini!" }],
+});
+
+// Azure OpenAI
+await anthropic.messages.create({
+  model: "azure/gpt-4o",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello from Azure!" }],
+});
+
+// Local Ollama
+await anthropic.messages.create({
+  model: "ollama/llama3.1:8b",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello from Ollama!" }],
+});
+```
+
+</CodeGroup>
+
+## Streaming
+
+Streaming is fully supported and behaves identically to direct Anthropic calls:
+
+<CodeGroup>
+
+```python Python
+import anthropic
+
+client = anthropic.Anthropic(
+    base_url="http://localhost:8080/anthropic",
+    api_key="your-bifrost-virtual-key"
+)
+
+with client.messages.stream(
+    model="anthropic/claude-3-5-sonnet-20241022",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Tell me a short story."}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+```
+
+```typescript TypeScript
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = new Anthropic({
+  baseURL: "http://localhost:8080/anthropic",
+  apiKey: "your-bifrost-virtual-key",
+});
+
+const stream = anthropic.messages.stream({
+  model: "anthropic/claude-3-5-sonnet-20241022",
+  max_tokens: 1024,
+  messages: [{ role: "user", content: "Tell me a short story." }],
+});
+
+for await (const event of stream) {
+  if (
+    event.type === "content_block_delta" &&
+    event.delta.type === "text_delta"
+  ) {
+    process.stdout.write(event.delta.text);
+  }
+}
+```
+
+</CodeGroup>
+
+## Virtual Keys & Custom Headers
+
+You can also pass your virtual key and any other governance headers via `default_headers` if you prefer to keep `api_key` as a placeholder:
+
+<CodeGroup>
+
+```python Python
+import anthropic
+
+client = anthropic.Anthropic(
+    base_url="http://localhost:8080/anthropic",
+    api_key="dummy-key",
+    default_headers={
+        "x-bf-vk": "your-bifrost-virtual-key",  # Governance virtual key
+    }
+)
+```
+
+```typescript TypeScript
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = new Anthropic({
+  baseURL: "http://localhost:8080/anthropic",
+  apiKey: "dummy-key",
+  defaultHeaders: {
+    "x-bf-vk": "your-bifrost-virtual-key", // Governance virtual key
+  },
+});
+```
+
+</CodeGroup>
+
+<Warning>
+  Anthropic frequently gates new features behind the `anthropic-beta` request header. Bifrost blocks unrecognized headers by default for security. If you need to pass `anthropic-beta`, add it to the header allow-list under **Settings → Client Settings** in the Bifrost UI.
+</Warning>
+
+## Next Steps
+
+- **[OpenAI SDK](/integrations/openai-sdk)** — Use GPT models with Bifrost
+- **[Drop-in Replacement](/integrations/drop-in-replacement)** — Migration overview for all SDKs
+- **[Retries & Fallbacks](/features/automatic-fallbacks)** — Configure automatic failover
+- **[Governance](/concepts/virtual-keys)** — Virtual keys, budgets, and rate limits

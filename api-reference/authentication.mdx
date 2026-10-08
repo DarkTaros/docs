@@ -1,0 +1,140 @@
+---
+title: "Authenticating API Requests with Bifrost Virtual Keys"
+sidebarTitle: "Authentication"
+description: "Pass virtual keys to Bifrost using any of four supported header formats, and learn how to enforce authentication on every inference request."
+---
+
+Bifrost uses **virtual keys** to authenticate and authorize API requests. A virtual key is a gateway-managed credential (prefixed with `sk-bf-`) that Bifrost maps to one or more upstream provider API keys. When you present a virtual key, Bifrost validates it, applies any access-control rules attached to it, and then injects the correct provider credential before forwarding your request. You never need to embed raw provider keys in your application.
+
+## Supported Header Formats
+
+Bifrost accepts virtual keys in four different headers so you can drop it into existing clients without code changes.
+
+### 1. `x-bf-vk` (Recommended)
+
+The native Bifrost header. Use this when you are building a new integration or when you want to pass both a virtual key and a separate `Authorization` header for your own authentication layer.
+
+```bash
+curl http://your-host:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-bf-vk: sk-bf-your-virtual-key" \
+  -d '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+### 2. `Authorization: Bearer` (OpenAI-compatible)
+
+Drop Bifrost in as a replacement for the OpenAI SDK by pointing your `base_url` at Bifrost and passing your virtual key as the bearer token.
+
+```bash
+curl http://your-host:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-bf-your-virtual-key" \
+  -d '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+### 3. `x-api-key` (Anthropic / generic key header)
+
+Use this when migrating from a client that authenticates with a plain `x-api-key` header, such as the Anthropic SDK.
+
+```bash
+curl http://your-host:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: sk-bf-your-virtual-key" \
+  -d '{
+    "model": "anthropic/claude-3-5-sonnet-20241022",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+### 4. `x-goog-api-key` (Google / Gemini SDK)
+
+Use this when you are routing Gemini requests through Bifrost with the Google AI client libraries.
+
+```bash
+curl http://your-host:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-goog-api-key: sk-bf-your-virtual-key" \
+  -d '{
+    "model": "gemini/gemini-1.5-pro",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+<Note>
+  Bifrost checks the four headers in the order listed above. The first non-empty header value is used. If you send multiple headers, only the first match is evaluated.
+</Note>
+
+## Enforcing Authentication
+
+By default, Bifrost allows unauthenticated requests so you can get started without configuring virtual keys. Once you are ready to lock down your deployment, set `enforce_auth_on_inference: true` in your Bifrost configuration. After that, every inference request that arrives without a recognized virtual key is rejected.
+
+```yaml
+# bifrost.config.yaml (example)
+enforce_auth_on_inference: true
+```
+
+<Warning>
+  Enable `enforce_auth_on_inference` before exposing Bifrost to any network outside your local machine. Unauthenticated access lets anyone send requests billed to your provider accounts.
+</Warning>
+
+## Error Responses
+
+When authentication fails, Bifrost returns an appropriate HTTP status code and a structured error body.
+
+### 400 — Virtual key required
+
+Returned when `enforce_auth_on_inference` is enabled and no virtual key header was provided.
+
+```json
+{
+  "event_id": "evt_01abc",
+  "type": "error",
+  "is_bifrost_error": true,
+  "status_code": 400,
+  "error": {
+    "type": "invalid_request_error",
+    "code": "virtual_key_required",
+    "message": "A virtual key is required to authenticate this request.",
+    "param": null,
+    "event_id": "evt_01abc"
+  },
+  "extra_fields": {
+    "model_requested": "openai/gpt-4o",
+    "request_type": "chat_completion"
+  }
+}
+```
+
+### 403 — Virtual key blocked
+
+Returned when the provided virtual key exists but has been suspended or does not have permission to access the requested provider or model.
+
+```json
+{
+  "event_id": "evt_02xyz",
+  "type": "error",
+  "is_bifrost_error": true,
+  "status_code": 403,
+  "error": {
+    "type": "permission_error",
+    "code": "virtual_key_blocked",
+    "message": "The provided virtual key does not have access to this resource.",
+    "param": null,
+    "event_id": "evt_02xyz"
+  },
+  "extra_fields": {
+    "model_requested": "openai/gpt-4o",
+    "request_type": "chat_completion"
+  }
+}
+```
+
+<Tip>
+  You can scope a virtual key to specific providers, models, or rate limits in the Bifrost dashboard or configuration file. This lets you issue separate keys for different teams or services, each with its own access policy.
+</Tip>

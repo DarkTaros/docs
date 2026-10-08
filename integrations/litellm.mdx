@@ -1,0 +1,172 @@
+---
+title: "LiteLLM Proxy Compatibility with Bifrost Gateway"
+sidebarTitle: "LiteLLM"
+description: "Use Bifrost as a LiteLLM-compatible backend by setting api_base to /litellm, adding governance, caching, and observability on top of your existing LiteLLM code."
+---
+
+LiteLLM provides a unified Python interface for calling models from many different providers. Bifrost sits behind it as the HTTP gateway — you point LiteLLM's `api_base` at Bifrost's `/litellm` endpoint and your existing `completion()` calls gain Bifrost's enterprise features: automatic retries and fallbacks, semantic caching, governance controls, and full observability. Your LiteLLM code doesn't change; only the routing destination does.
+
+**Endpoint:** `http://localhost:8080/litellm`
+
+<Note>
+  This integration only works for providers that both LiteLLM and Bifrost support. Requests targeting a provider available only in one of the two will fail. See [Supported Providers](/concepts/providers) for what Bifrost covers.
+</Note>
+
+## Basic Setup
+
+```python
+from litellm import completion
+
+response = completion(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}],
+    api_base="http://localhost:8080/litellm",  # Point to Bifrost
+    api_key="your-bifrost-virtual-key"  # Pass your Bifrost virtual key
+)
+
+print(response.choices[0].message.content)
+```
+
+## Before & After
+
+```python
+# Before — LiteLLM calling OpenAI directly
+response = completion(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}],
+    api_key="sk-your-openai-key" # [!code --]
+)
+
+# After — LiteLLM routed through Bifrost
+response = completion(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}],
+    api_base="http://localhost:8080/litellm",  # [!code ++]
+    api_key="your-bifrost-virtual-key"  # Pass your Bifrost virtual key  # [!code ++]
+)
+```
+
+## Multi-Provider Usage
+
+LiteLLM's existing provider-prefixed model names work unchanged through Bifrost — Bifrost routes each request to the correct backend based on the prefix:
+
+```python
+from litellm import completion
+
+api_base = "http://localhost:8080/litellm"
+
+# OpenAI
+openai_response = completion(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello from GPT!"}],
+    api_base=api_base,
+    api_key="your-bifrost-virtual-key"
+)
+
+# Anthropic
+anthropic_response = completion(
+    model="anthropic/claude-3-5-sonnet-20241022",
+    messages=[{"role": "user", "content": "Hello from Claude!"}],
+    api_base=api_base,
+    api_key="your-bifrost-virtual-key"
+)
+
+# Google Gemini
+google_response = completion(
+    model="gemini/gemini-1.5-flash",
+    messages=[{"role": "user", "content": "Hello from Gemini!"}],
+    api_base=api_base,
+    api_key="your-bifrost-virtual-key"
+)
+
+# Azure OpenAI
+azure_response = completion(
+    model="azure/gpt-4o",
+    messages=[{"role": "user", "content": "Hello from Azure!"}],
+    api_base=api_base,
+    api_key="your-bifrost-virtual-key"
+)
+
+print(openai_response.choices[0].message.content)
+print(anthropic_response.choices[0].message.content)
+print(google_response.choices[0].message.content)
+print(azure_response.choices[0].message.content)
+```
+
+<Tip>
+  Because Bifrost handles multi-provider routing natively, you can also configure fallback models inside Bifrost itself — independent of LiteLLM's own fallback mechanism. This gives you a second layer of resilience at the gateway level.
+</Tip>
+
+## Streaming
+
+Streaming passes through Bifrost without any changes to your LiteLLM streaming code:
+
+```python
+from litellm import completion
+
+response = completion(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Write me a haiku about proxies."}],
+    api_base="http://localhost:8080/litellm",
+    api_key="your-bifrost-virtual-key",
+    stream=True
+)
+
+for chunk in response:
+    delta = chunk.choices[0].delta.content
+    if delta:
+        print(delta, end="", flush=True)
+```
+
+## Custom Headers for Governance
+
+Pass Bifrost virtual keys and governance headers using `extra_headers`:
+
+```python
+from litellm import completion
+
+response = completion(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}],
+    api_base="http://localhost:8080/litellm",
+    api_key="your-bifrost-virtual-key",
+    extra_headers={
+        "x-bf-vk": "your-bifrost-virtual-key",  # Governance virtual key
+    }
+)
+
+print(response.choices[0].message.content)
+```
+
+## Using a Persistent Session
+
+If you make many requests, create a reusable function or client wrapper to avoid repeating configuration:
+
+```python
+from litellm import completion
+from functools import partial
+
+# Partially apply Bifrost config once
+bifrost_completion = partial(
+    completion,
+    api_base="http://localhost:8080/litellm",
+    api_key="your-bifrost-virtual-key",
+    extra_headers={"x-bf-vk": "your-bifrost-virtual-key"},
+)
+
+# Use just like regular litellm.completion
+response = bifrost_completion(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+
+print(response.choices[0].message.content)
+```
+
+## Next Steps
+
+- **[LangChain](/integrations/langchain)** — Route LangChain chains through Bifrost
+- **[Drop-in Replacement](/integrations/drop-in-replacement)** — Migration overview for all SDKs
+- **[Retries & Fallbacks](/features/automatic-fallbacks)** — Configure gateway-level failover
+- **[Governance](/concepts/virtual-keys)** — Virtual keys, budgets, and usage controls
+- **[Quickstart](/quickstart)** — Get Bifrost up and running

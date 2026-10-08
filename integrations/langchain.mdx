@@ -1,0 +1,317 @@
+---
+title: "LangChain Integration: Route LangChain through Bifrost"
+sidebarTitle: "LangChain"
+description: "Route your LangChain Python and JavaScript apps through Bifrost for governance, semantic caching, and observability without changing your chain or agent code."
+---
+
+LangChain already abstracts over multiple AI providers, and Bifrost sits one layer below it — acting as the HTTP backend that LangChain's provider clients actually talk to. By pointing LangChain's `base_url` (or equivalent) at Bifrost's `/langchain` endpoint, you layer enterprise features — governance, semantic caching, MCP tool routing, observability — on top of your existing LangChain architecture without touching a single chain or agent definition.
+
+**Endpoint:** `http://localhost:8080/langchain`
+
+<Note>
+  Provider compatibility is scoped to what both LangChain and Bifrost support. Providers available only in LangChain or only in Bifrost cannot be bridged through this integration.
+</Note>
+
+## Basic Setup
+
+<Tabs>
+  <Tab title="Python">
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    openai_api_base="http://localhost:8080/langchain",
+    openai_api_key="your-bifrost-virtual-key"  # Pass your Bifrost virtual key
+)
+
+response = llm.invoke([HumanMessage(content="Hello!")])
+print(response.content)
+```
+
+  </Tab>
+  <Tab title="JavaScript">
+
+```typescript
+import { ChatOpenAI } from "@langchain/openai";
+
+const llm = new ChatOpenAI({
+  model: "gpt-4o-mini",
+  configuration: {
+    baseURL: "http://localhost:8080/langchain",
+  },
+  openAIApiKey: "your-bifrost-virtual-key", // Pass your Bifrost virtual key
+});
+
+const response = await llm.invoke("Hello!");
+console.log(response.content);
+```
+
+  </Tab>
+</Tabs>
+
+## ChatOpenAI
+
+`ChatOpenAI` supports all OpenAI-compatible models, including cross-provider models when using provider-prefixed names:
+
+<Tabs>
+  <Tab title="Python">
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+
+base_url = "http://localhost:8080/langchain"
+
+# Standard OpenAI model
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    openai_api_base=base_url,
+    openai_api_key="your-bifrost-virtual-key"
+)
+
+response = llm.invoke([HumanMessage(content="Explain LangChain in one sentence.")])
+print(response.content)
+```
+
+  </Tab>
+  <Tab title="JavaScript">
+
+```typescript
+import { ChatOpenAI } from "@langchain/openai";
+
+const llm = new ChatOpenAI({
+  model: "gpt-4o-mini",
+  configuration: {
+    baseURL: "http://localhost:8080/langchain",
+  },
+  openAIApiKey: "your-bifrost-virtual-key",
+});
+
+const response = await llm.invoke("Explain LangChain in one sentence.");
+console.log(response.content);
+```
+
+  </Tab>
+</Tabs>
+
+## ChatAnthropic
+
+Use `ChatAnthropic` from `langchain_anthropic` and point `anthropic_api_url` at Bifrost:
+
+<Tabs>
+  <Tab title="Python">
+
+```python
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage
+
+llm = ChatAnthropic(
+    model="anthropic/claude-3-5-sonnet-20241022",
+    anthropic_api_url="http://localhost:8080/langchain",
+    anthropic_api_key="your-bifrost-virtual-key"  # Pass your Bifrost virtual key
+)
+
+response = llm.invoke([HumanMessage(content="Hello from Claude via Bifrost!")])
+print(response.content)
+```
+
+  </Tab>
+  <Tab title="JavaScript">
+
+```typescript
+import { ChatAnthropic } from "@langchain/anthropic";
+
+const llm = new ChatAnthropic({
+  model: "anthropic/claude-3-5-sonnet-20241022",
+  clientOptions: {
+    baseURL: "http://localhost:8080/langchain",
+  },
+  anthropicApiKey: "your-bifrost-virtual-key", // Pass your Bifrost virtual key
+});
+
+const response = await llm.invoke("Hello from Claude via Bifrost!");
+console.log(response.content);
+```
+
+  </Tab>
+</Tabs>
+
+## Multi-Provider Usage
+
+Switch between providers by changing the model name — your chain code stays the same:
+
+<Tabs>
+  <Tab title="Python">
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
+
+base_url = "http://localhost:8080/langchain"
+
+# OpenAI
+openai_llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    openai_api_base=base_url,
+    openai_api_key="your-bifrost-virtual-key"
+)
+
+# Anthropic
+anthropic_llm = ChatAnthropic(
+    model="anthropic/claude-3-5-sonnet-20241022",
+    anthropic_api_url=base_url,
+    anthropic_api_key="your-bifrost-virtual-key"
+)
+
+# Google Gemini
+google_llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
+    google_api_base=base_url,
+    google_api_key="your-bifrost-virtual-key"
+)
+
+# All use the same invoke pattern
+question = [HumanMessage(content="What is an AI gateway?")]
+print(openai_llm.invoke(question).content)
+print(anthropic_llm.invoke(question).content)
+print(google_llm.invoke(question).content)
+```
+
+  </Tab>
+  <Tab title="JavaScript">
+
+```typescript
+import { ChatOpenAI } from "@langchain/openai";
+import { ChatAnthropic } from "@langchain/anthropic";
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+
+const baseURL = "http://localhost:8080/langchain";
+
+const openaiLlm = new ChatOpenAI({
+  model: "gpt-4o-mini",
+  configuration: { baseURL },
+  openAIApiKey: "your-bifrost-virtual-key",
+});
+
+const anthropicLlm = new ChatAnthropic({
+  model: "anthropic/claude-3-5-sonnet-20241022",
+  clientOptions: { baseURL },
+  anthropicApiKey: "your-bifrost-virtual-key",
+});
+
+const googleLlm = new ChatGoogleGenerativeAI({
+  model: "gemini-1.5-flash",
+  baseURL,
+  apiKey: "your-bifrost-virtual-key",
+});
+
+const question = "What is an AI gateway?";
+console.log((await openaiLlm.invoke(question)).content);
+console.log((await anthropicLlm.invoke(question)).content);
+console.log((await googleLlm.invoke(question)).content);
+```
+
+  </Tab>
+</Tabs>
+
+## Embeddings
+
+Use `OpenAIEmbeddings` to generate embeddings through Bifrost:
+
+```python
+from langchain_openai import OpenAIEmbeddings
+
+embeddings = OpenAIEmbeddings(
+    model="text-embedding-3-small",
+    base_url="http://localhost:8080/langchain",
+    api_key="your-bifrost-virtual-key"
+)
+
+query_vector = embeddings.embed_query("What is machine learning?")
+
+doc_vectors = embeddings.embed_documents([
+    "Machine learning is a subset of AI",
+    "Deep learning uses neural networks",
+    "NLP helps computers understand text",
+])
+```
+
+<Note>
+  `OpenAIEmbeddings` converts text to integer token arrays before sending the request. OpenAI's API accepts both, but most other providers (Cohere, Bedrock, Gemini) only accept text strings. For cross-provider embeddings, use `GoogleGenerativeAIEmbeddings` from `langchain_google_genai` instead — it sends raw text strings and works with any provider Bifrost supports.
+</Note>
+
+## Custom Headers for Governance
+
+Pass Bifrost virtual keys and other headers through the provider-specific header parameter:
+
+<CodeGroup>
+
+```python ChatOpenAI (Python)
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    openai_api_base="http://localhost:8080/langchain",
+    openai_api_key="your-bifrost-virtual-key",
+    default_headers={
+        "x-bf-vk": "your-bifrost-virtual-key",
+    }
+)
+```
+
+```python ChatAnthropic (Python)
+from langchain_anthropic import ChatAnthropic
+
+llm = ChatAnthropic(
+    model="anthropic/claude-3-5-sonnet-20241022",
+    anthropic_api_url="http://localhost:8080/langchain",
+    anthropic_api_key="your-bifrost-virtual-key",
+    default_headers={
+        "x-bf-vk": "your-bifrost-virtual-key",
+    }
+)
+```
+
+```typescript ChatOpenAI (JS)
+import { ChatOpenAI } from "@langchain/openai";
+
+const llm = new ChatOpenAI({
+  model: "gpt-4o-mini",
+  configuration: {
+    baseURL: "http://localhost:8080/langchain",
+    defaultHeaders: {
+      "x-bf-vk": "your-bifrost-virtual-key",
+    },
+  },
+  openAIApiKey: "your-bifrost-virtual-key",
+});
+```
+
+```typescript ChatAnthropic (JS)
+import { ChatAnthropic } from "@langchain/anthropic";
+
+const llm = new ChatAnthropic({
+  model: "anthropic/claude-3-5-sonnet-20241022",
+  clientOptions: {
+    baseURL: "http://localhost:8080/langchain",
+    defaultHeaders: {
+      "x-bf-vk": "your-bifrost-virtual-key",
+    },
+  },
+  anthropicApiKey: "your-bifrost-virtual-key",
+});
+```
+
+</CodeGroup>
+
+## Next Steps
+
+- **[LiteLLM](/integrations/litellm)** — litellm.completion with Bifrost as the backend
+- **[Drop-in Replacement](/integrations/drop-in-replacement)** — Migration overview for all SDKs
+- **[Governance](/concepts/virtual-keys)** — Virtual keys, budgets, and team management
+- **[Semantic Caching](/features/semantic-caching)** — Speed up repeated LangChain queries

@@ -1,0 +1,256 @@
+---
+title: "Agent Mode: Autonomous AI Tool Execution in Bifrost"
+sidebarTitle: "Agent Mode"
+description: "Enable autonomous tool execution in Bifrost with per-tool auto-approval. Bifrost loops through tool calls automatically until the task is complete."
+---
+
+Agent Mode transforms Bifrost from a stateless tool gateway into an autonomous agent runtime. Instead of requiring your application to call `/v1/mcp/tool/execute` for each tool in turn, Bifrost runs the entire tool-calling loop internally — executing approved tools, feeding results back to the LLM, and iterating until the task completes or the depth limit is reached.
+
+Agent Mode requires Bifrost **v1.4.0-prerelease1** or later.
+
+<Warning>
+  **Streaming not supported.** Agent Mode is incompatible with streaming endpoints (`chat_stream`, `responses_stream`). The autonomous loop requires complete responses before proceeding to the next iteration. Use the non-streaming `chat` and `responses` endpoints when Agent Mode is enabled.
+</Warning>
+
+## How Agent Mode Works
+
+When you mark specific tools as auto-executable, a single call to `/v1/chat/completions` can trigger a full multi-step agentic workflow:
+
+1. The LLM returns tool calls in its response
+2. Bifrost automatically executes all **auto-executable** tools in parallel
+3. Tool results are fed back into the LLM as the next conversation turn
+4. The loop continues until the LLM returns no more tool calls, or the `max_agent_depth` limit is reached
+5. Non-auto-executable tool calls are returned to your application for manual approval
+
+Agent Mode requires explicit configuration — no tools auto-execute by default.
+
+## Configuration
+
+Agent Mode uses two fields that work together:
+
+| Field | Purpose |
+|-------|---------|
+| `tools_to_execute` | Whitelist of tools the LLM can see and request |
+| `tools_to_auto_execute` | Subset of the above that execute automatically without approval |
+
+A tool must appear in **both** lists to be auto-executed. If a tool is in `tools_to_auto_execute` but not in `tools_to_execute`, it is silently ignored.
+
+## Enabling Agent Mode
+
+<Tabs>
+  <Tab title="API">
+    Add `tools_to_auto_execute` when creating or updating an MCP client:
+
+    ```bash
+    curl -X POST http://localhost:8080/api/mcp/client \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "filesystem",
+        "connection_type": "stdio",
+        "stdio_config": {
+          "command": "npx",
+          "args": ["-y", "@anthropic/mcp-filesystem"]
+        },
+        "tools_to_execute": ["*"],
+        "tools_to_auto_execute": ["read_file", "list_directory"]
+      }'
+    ```
+
+    To update an existing client to auto-execute all tools:
+
+    ```bash
+    curl -X PUT http://localhost:8080/api/mcp/client/{id} \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "filesystem",
+        "connection_type": "stdio",
+        "stdio_config": {
+          "command": "npx",
+          "args": ["-y", "@anthropic/mcp-filesystem"]
+        },
+        "tools_to_execute": ["*"],
+        "tools_to_auto_execute": ["*"]
+      }'
+    ```
+  </Tab>
+  <Tab title="config.json">
+    ```json
+    {
+      "mcp": {
+        "client_configs": [
+          {
+            "name": "filesystem",
+            "connection_type": "stdio",
+            "stdio_config": {
+              "command": "npx",
+              "args": ["-y", "@anthropic/mcp-filesystem"]
+            },
+            "tools_to_execute": ["*"],
+            "tools_to_auto_execute": ["read_file", "list_directory"]
+          },
+          {
+            "name": "web_search",
+            "connection_type": "http",
+            "connection_string": "http://localhost:3001/mcp",
+            "tools_to_execute": ["search"],
+            "tools_to_auto_execute": ["search"]
+          }
+        ],
+        "tool_manager_config": {
+          "max_agent_depth": 10,
+          "tool_execution_timeout": "30s"
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Go SDK">
+    ```go
+    mcpConfig := &schemas.MCPConfig{
+        ClientConfigs: []schemas.MCPClientConfig{
+            {
+                Name:           "filesystem",
+                ConnectionType: schemas.MCPConnectionTypeSTDIO,
+                StdioConfig: &schemas.MCPStdioConfig{
+                    Command: "npx",
+                    Args:    []string{"-y", "@anthropic/mcp-filesystem"},
+                },
+                // All tools available to the LLM
+                ToolsToExecute: []string{"*"},
+                // Only safe read operations auto-execute
+                ToolsToAutoExecute: []string{"read_file", "list_directory"},
+            },
+        },
+        ToolManagerConfig: &schemas.MCPToolManagerConfig{
+            MaxAgentDepth:        10,
+            ToolExecutionTimeout: 30 * time.Second,
+        },
+    }
+
+    client, err := bifrost.Init(context.Background(), schemas.BifrostConfig{
+        Account:   account,
+        MCPConfig: mcpConfig,
+    })
+    ```
+
+    With the SDK, calling `ChatCompletionRequest` automatically runs the agent loop:
+
+    ```go
+    // This single call may trigger multiple LLM ↔ tool iterations internally
+    response, err := client.ChatCompletionRequest(
+        schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+        &schemas.BifrostChatRequest{
+            Provider: schemas.OpenAI,
+            Model:    "gpt-4o",
+            Input: []schemas.ChatMessage{{
+                Role:    schemas.ChatMessageRoleUser,
+                Content: schemas.ChatMessageContent{
+                    ContentStr: bifrost.Ptr("List all Go files and summarize their purpose"),
+                },
+            }},
+        },
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Agent Mode Behavior
+
+### Depth Limiting
+
+The `max_agent_depth` setting (default: `10`) limits how many LLM-call iterations can occur. Each LLM call that produces tool calls counts as one iteration. When the limit is reached, Bifrost returns the current response as-is — which may contain pending tool calls.
+
+Configure the global agent depth via the API:
+
+```bash
+curl -X PUT http://localhost:8080/api/settings/mcp/tool-manager-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "max_agent_depth": 15,
+    "tool_execution_timeout": "45s"
+  }'
+```
+
+### Parallel Execution
+
+Auto-executable tools within a single iteration are executed **in parallel** for performance. Within the same iteration, all auto-executable tool calls are dispatched simultaneously, their results collected, and the combined output is fed back to the LLM in one turn.
+
+### Mixed Auto/Non-Auto Tools
+
+When an LLM response contains a mix of auto-executable and non-auto-executable tool calls, Bifrost:
+
+1. Executes all auto-executable tools immediately (in parallel)
+2. Returns the response with:
+   - A `content` field containing a JSON summary of what was already executed
+   - A `tool_calls` array containing only the non-auto-executable tools that still need approval
+   - `finish_reason: "stop"` to exit the agent loop
+
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": "The Output from allowed tools calls is - {\"filesystem_list_directory\":\"[\\\"file1.go\\\", \\\"file2.go\\\"]\"}\n\nNow I shall call these tools next...",
+      "tool_calls": [{
+        "id": "call_pending",
+        "type": "function",
+        "function": {
+          "name": "filesystem_write_file",
+          "arguments": "{\"path\": \"output.txt\", \"content\": \"...\"}"
+        }
+      }]
+    },
+    "finish_reason": "stop"
+  }]
+}
+```
+
+Your application then reviews the pending tool calls, executes or rejects them manually, and continues the conversation with the results.
+
+## Security Considerations
+
+Be deliberate about which tools you mark as auto-executable. Operations that modify data, delete records, or execute system commands should almost always require human approval.
+
+<Warning>
+  Granting `tools_to_auto_execute: ["*"]` means Bifrost will execute **any** tool the LLM requests without pausing for approval. Only use this for servers where all tools are safe, read-only operations.
+</Warning>
+
+A safe configuration pattern separates read operations (safe to auto-execute) from write operations (require approval):
+
+```json
+{
+  "tools_to_execute": ["*"],
+  "tools_to_auto_execute": [
+    "read_file",
+    "list_directory",
+    "search",
+    "get_weather",
+    "fetch_url"
+  ]
+}
+```
+
+**Safe for auto-execution:**
+- Read operations (`read_file`, `list_directory`, `get_record`)
+- Search and query operations (`search`, `fetch_url`, `lookup`)
+- Non-destructive information gathering
+
+**Require human approval:**
+- Write operations (`write_file`, `create_record`, `update_database`)
+- Delete operations (`delete_file`, `remove_record`)
+- Execute operations (`run_command`, `execute_script`)
+- Side-effect operations (sending emails, making purchases, posting to APIs)
+
+## Code Mode with Agent Mode
+
+If you are using Code Mode, the `listToolFiles` and `readToolFile` meta-tools are always safe to auto-execute (they are read-only). The `executeToolCode` tool is auto-executable only if **all** tool calls within the generated Python code are themselves in the `tools_to_auto_execute` list for the relevant server. If any single call is not on the auto-execute list, Bifrost returns the code for your approval instead.
+
+## Next Steps
+
+<Card title="Tool Execution" icon="play" href="/mcp/tool-execution">
+  Review the explicit tool execution workflow that Agent Mode automates.
+</Card>
+
+<Card title="Tool Filtering" icon="filter" href="/concepts/virtual-keys">
+  Control which tools are available per-request or per-virtual-key for finer-grained agent scope.
+</Card>

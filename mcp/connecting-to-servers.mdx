@@ -1,0 +1,267 @@
+---
+title: "Connect Bifrost to MCP Servers via STDIO, HTTP, or SSE"
+sidebarTitle: "Connect Servers"
+description: "Add MCP server connections to Bifrost using STDIO, HTTP, or SSE transports. Manage clients at runtime with automatic retry and reconnection logic."
+---
+
+Bifrost can connect to any MCP-compatible server to discover and execute tools. Each connection is called an **MCP Client** in Bifrost terminology. You can add, update, disable, or remove clients at runtime without restarting the gateway — and Bifrost handles transient connection failures automatically with exponential backoff retry logic.
+
+## Connection Types
+
+Bifrost supports three transport protocols. Choose based on where your MCP server runs:
+
+| Type | Description | Best For |
+|------|-------------|----------|
+| **STDIO** | Spawns a subprocess and communicates via stdin/stdout | Local tools, CLI utilities, scripts |
+| **HTTP** | Sends requests to an HTTP endpoint | Remote APIs, microservices, cloud functions |
+| **SSE** | Server-Sent Events for persistent connections | Real-time data, streaming tools |
+
+Authentication is configured separately from the connection protocol. STDIO connections inherit their environment from the spawned subprocess and have no per-call auth model. HTTP and SSE connections support all five auth modes: `none`, `headers`, `oauth`, `per_user_oauth`, and `per_user_headers`. See [Authentication →](/mcp/authentication).
+
+<Warning>
+  **Docker Users:** STDIO connections require the subprocess command (e.g., `npx`, `python`) to be installed inside the container. When running Bifrost in Docker, either build a custom image with the required dependencies or use HTTP/SSE connections to externally hosted MCP servers instead.
+</Warning>
+
+## Adding an MCP Client
+
+Use the Management API to register an MCP client. The `name` field must be unique, contain only ASCII characters, and cannot include hyphens or spaces.
+
+<CodeGroup>
+
+```bash Add STDIO Server
+curl -X POST http://localhost:8080/api/mcp/client \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "filesystem",
+    "connection_type": "stdio",
+    "stdio_config": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-filesystem"],
+      "envs": ["HOME", "PATH"]
+    },
+    "tools_to_execute": ["*"]
+  }'
+```
+
+```bash Add HTTP Server
+curl -X POST http://localhost:8080/api/mcp/client \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "web_search",
+    "connection_type": "http",
+    "connection_string": "http://localhost:3001/mcp",
+    "tools_to_execute": ["*"]
+  }'
+```
+
+```bash Add SSE Server
+curl -X POST http://localhost:8080/api/mcp/client \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "realtime_data",
+    "connection_type": "sse",
+    "connection_string": "https://api.example.com/mcp/sse",
+    "tools_to_execute": ["*"]
+  }'
+```
+
+</CodeGroup>
+
+<Tip>
+  Use the `env.VARIABLE_NAME` syntax in `connection_string` values to reference environment variables for sensitive URLs. For example: `"connection_string": "env.WEB_SEARCH_MCP_URL"`. Values are automatically resolved at startup and redacted from API responses.
+</Tip>
+
+## Listing Connected Clients
+
+To see all registered clients and their current state:
+
+```bash
+curl http://localhost:8080/api/mcp/clients
+```
+
+```json
+[
+  {
+    "config": {
+      "id": "abc123",
+      "name": "filesystem",
+      "connection_type": "stdio",
+      "stdio_config": {
+        "command": "npx",
+        "args": ["-y", "@anthropic/mcp-filesystem"]
+      }
+    },
+    "tools": [
+      {"name": "read_file", "description": "Read contents of a file"},
+      {"name": "write_file", "description": "Write contents to a file"},
+      {"name": "list_directory", "description": "List directory contents"}
+    ],
+    "state": "connected"
+  }
+]
+```
+
+## Configuring via config.json
+
+You can also define MCP clients statically in your `config.json`. Clients defined this way start automatically when Bifrost boots:
+
+```json
+{
+  "mcp": {
+    "tool_manager_config": {
+      "tool_execution_timeout": "30s",
+      "max_agent_depth": 10
+    },
+    "client_configs": [
+      {
+        "name": "filesystem",
+        "connection_type": "stdio",
+        "is_ping_available": true,
+        "stdio_config": {
+          "command": "npx",
+          "args": ["-y", "@anthropic/mcp-filesystem"],
+          "envs": ["HOME", "PATH"]
+        },
+        "tools_to_execute": ["*"]
+      },
+      {
+        "name": "web_search",
+        "connection_type": "http",
+        "connection_string": "env.WEB_SEARCH_MCP_URL",
+        "is_ping_available": false,
+        "tools_to_execute": ["search", "fetch_url"]
+      }
+    ]
+  }
+}
+```
+
+## Tool Availability Controls
+
+Two fields control which tools from a client are available and how they can be executed:
+
+### `tools_to_execute`
+
+Controls which tools from the client are exposed to the LLM:
+
+| Value | Behavior |
+|-------|----------|
+| `["*"]` | All tools from this client are available |
+| `[]` or `null` | No tools available (deny-by-default) |
+| `["tool1", "tool2"]` | Only the listed tools are available |
+
+### `tools_to_auto_execute` (Agent Mode)
+
+Controls which available tools can run automatically without an explicit execute call. A tool must appear in **both** `tools_to_execute` and `tools_to_auto_execute` to be auto-executed. See [Agent Mode →](/mcp/agent-mode) for the full behavior.
+
+```bash
+# Add a client where all tools are available but only read operations auto-execute
+curl -X POST http://localhost:8080/api/mcp/client \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "filesystem",
+    "connection_type": "stdio",
+    "stdio_config": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-filesystem"]
+    },
+    "tools_to_execute": ["*"],
+    "tools_to_auto_execute": ["read_file", "list_directory"]
+  }'
+```
+
+## Connection States
+
+| State | Description |
+|-------|-------------|
+| `connected` | Client is active and tools are available |
+| `connecting` | Client is establishing a connection |
+| `disconnected` | Client lost connection but can be reconnected |
+| `error` | Client configuration or connection failed permanently |
+
+## Managing Clients at Runtime
+
+You can reconnect, update, or remove clients without restarting Bifrost:
+
+<CodeGroup>
+
+```bash Reconnect a Client
+curl -X POST http://localhost:8080/api/mcp/client/{id}/reconnect
+```
+
+```bash Update Tool Config
+curl -X PUT http://localhost:8080/api/mcp/client/{id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "filesystem",
+    "connection_type": "stdio",
+    "stdio_config": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-filesystem"]
+    },
+    "tools_to_execute": ["read_file", "list_directory"]
+  }'
+```
+
+```bash Disable a Client
+curl -X PUT http://localhost:8080/api/mcp/client/{id} \
+  -H "Content-Type: application/json" \
+  -d '{"disabled": true}'
+```
+
+```bash Remove a Client
+curl -X DELETE http://localhost:8080/api/mcp/client/{id}
+```
+
+</CodeGroup>
+
+<Note>
+  When you disable a client, Bifrost shuts down its connection, health monitor, and tool syncer. The client entry is preserved and its tools are invisible to inference requests until you re-enable it. The `disabled` state persists across restarts.
+</Note>
+
+## Connection Resilience and Retry Logic
+
+Bifrost automatically retries failed connections using exponential backoff to handle transient network issues. The retry strategy follows `DefaultRetryConfig`:
+
+| Parameter | Value |
+|-----------|-------|
+| Max retries | 5 (6 total attempts) |
+| Initial backoff | 1 second |
+| Max backoff | 30 seconds |
+| Backoff multiplier | 2× |
+
+Bifrost only retries **transient errors** such as network timeouts, connection refused, DNS failures, HTTP 5xx, and HTTP 429. **Permanent errors** — including authentication failures, missing commands, and configuration errors — fail immediately without retry.
+
+When a client reaches 5 consecutive health check failures, Bifrost marks it `disconnected` and automatically attempts reconnection in the background using the same retry strategy. Tools become available again once the connection is restored, without any manual intervention.
+
+### Health Check Methods
+
+By default, Bifrost uses the lightweight **ping** method for health checks every 10 seconds. If your MCP server does not support the MCP ping protocol, set `is_ping_available: false` to use the `listTools` method instead:
+
+```bash
+curl -X PUT http://localhost:8080/api/mcp/client/{id} \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my_server", "is_ping_available": false}'
+```
+
+## Naming Conventions
+
+MCP client names have strict requirements:
+
+- Must contain only ASCII characters
+- Cannot contain hyphens (`-`) or spaces
+- Cannot start with a number
+- Must be unique across all clients
+
+**Valid:** `filesystem`, `web_search`, `myAPI`, `tool123`  
+**Invalid:** `my-tools`, `web search`, `123tools`, `datos-api`
+
+## Next Steps
+
+<Card title="Authentication" icon="lock" href="/mcp/authentication">
+  Configure auth for HTTP and SSE MCP servers — static keys, OAuth 2.0, or per-user credentials.
+</Card>
+
+<Card title="Tool Execution" icon="play" href="/mcp/tool-execution">
+  Learn how to execute tools returned by LLM responses.
+</Card>
